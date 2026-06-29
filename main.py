@@ -6,13 +6,8 @@ campus-level data into a single workbook with:
   - "VCART Totals" sheet  — territory-level summary (raw + %) with
     monthly time series and snapshot history
   - "VCART Systems - LIVE" sheet — campus-level live data (all rows)
-  - Snapshot preservation and monthly rollover (same pattern as VRHR)
+  - Snapshot preservation and monthly rollover
 
-Usage:
-    python main_vcart.py
-
-Put this file and config.py in the same folder.
-Set BASE_DIR in config.py to the folder containing all territory files.
 """
 
 import os
