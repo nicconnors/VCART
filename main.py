@@ -473,8 +473,10 @@ def write_totals_sheet_headers(ws):
 
     # Column widths
     ws.column_dimensions["A"].width = 22
-    ws.column_dimensions["B"].width = 10
-    for col_letter in ["C","D","E","F","G","H"]:
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 16
+    for col_letter in ["E","F","G","H"]:
         ws.column_dimensions[col_letter].width = 10
     for col_letter in ["I","J","K","L","M","N","O","P","Q","R","S"]:
         ws.column_dimensions[col_letter].width = 28
