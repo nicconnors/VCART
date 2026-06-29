@@ -11,8 +11,8 @@ campus-level data into a single workbook with:
 Usage:
     python main_vcart.py
 
-Put this file and config_vcart.py in the same folder.
-Set BASE_DIR in config_vcart.py to the folder containing all territory files.
+Put this file and config.py in the same folder.
+Set BASE_DIR in config.py to the folder containing all territory files.
 """
 
 import os

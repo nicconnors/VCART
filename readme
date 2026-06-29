@@ -1,0 +1,106 @@
+# VCART VRHR Aggregator
+
+Reads per-territory VCART VRHR Excel files and aggregates them into a single output workbook with territory-level summaries, campus-level data, monthly time series, and snapshot history.
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `main.py` | Main script — run this every time you want to refresh |
+| `config.py` | All settings: file paths, territory list, column mappings |
+| `migrate.py` | One-time migration — backfills historical months from old file |
+
+---
+
+## Setup
+
+1. Make sure Python 3.12+ is installed
+2. Create a virtual environment and install the dependency:
+```
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install openpyxl
+```
+3. Open `config.py` and confirm `BASE_DIR` and `OUTPUT` paths are correct
+
+---
+
+## Usage
+
+### Normal refresh (run weekly or as needed)
+```
+python main.py
+```
+
+### First time only — migrate historical months from old file
+```
+python migrate.py
+```
+Run `main.py` first, then `migrate.py` once. Never run `migrate.py` again after that.
+
+---
+
+## How it works
+
+### Source files
+Each territory has its own VCART VRHR Excel file in the `BASE_DIR` folder. The script reads the `VRHR.VCART` sheet from each file — row 3 (TOTALS) for territory-level aggregates, and rows 7+ for campus-level data.
+
+### Output file: `VCART.Region.Nation.Totals.New.xlsx`
+
+**Sheet 1 — VCART Totals**
+- Rows 3–15: monthly time series (total barriers + per-barrier breakdown)
+- LIVE section: raw counts for all 16 territories + NATION
+- % of LIVE section: same data expressed as % of total accounts
+- Snapshot history: one block per past month, most recent first
+
+**Sheet 2 — VCART Systems - LIVE**
+- Campus-level data for all territories, refreshed every run
+
+**Sheet 3+ — VCART Systems - [Month Year]**
+- Created automatically on month rollover, one sheet per past month
+
+### Monthly rollover
+When you run `main.py` in a new month, it automatically:
+1. Saves the outgoing month's LIVE data as a snapshot in VCART Totals
+2. Creates a new `VCART Systems - [Month]` sheet with the campus-level data
+3. Writes the new month into the time series
+4. Refreshes the LIVE section with current data
+
+---
+
+## Configuration
+
+All settings live in `config.py`. Key things to update:
+
+**Adding or renaming a territory file:**
+Update the `TERRITORIES` list — each entry is `(display_label, filename, territory_number_override)`. Set `territory_number_override` to `None` if the territory number is in col A of the source file.
+
+**Changing output location:**
+Update `OUTPUT` path.
+
+**Changing source file folder:**
+Update `BASE_DIR` path.
+
+---
+
+## Territories
+
+| Label | Territory # | Rep |
+|---|---|---|
+| VCART: National | VREJ01 | Natalie Quick |
+| VCART: Northeast | VREJ02 | Jeff Wynn |
+| VCART: NYC North | VREJ03 | Keith Reynolds |
+| VCART: NYC South | VCNC05 | Julie Cooper |
+| VCART: Mid Atlantic | VREJ05 | Karen Shea |
+| VCART: SoCal | VREK02 | Jennifer Vucson |
+| VCART: Central North | VREK03 | Merritt Ewer |
+| VCART: Texas | VREK04 | Jennifer Rinehart |
+| VCART: Mid South | VREK09 | Erica Woods |
+| VCART: Great Lakes | VREK05 | Merritt Ewer |
+| VCART: Ohio Valley | VREK06 | Stacey Vick |
+| VCART: New England | VREJ08 | Sam Becerra |
+| VCART: Carolinas | VREJ06 | Deidre Williams |
+| VCART: Southeast | VREJ07 | Sam Quintero |
+| VCART: Central West | VREK01 | LaShun Debnam |
+| VCART: PacNW | VREK07 | Jenn Pingul |
