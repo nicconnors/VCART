@@ -476,9 +476,9 @@ def write_totals_sheet_headers(ws):
     ws.column_dimensions["B"].width = 10
     for col_letter in ["C","D","E","F","G","H"]:
         ws.column_dimensions[col_letter].width = 10
-    for col_letter in ["I","J","K","L","M","N","O","P"]:
-        ws.column_dimensions[col_letter].width = 14
-    for col_letter in ["Q","R","S","T","U","V","W","X","Y","Z"]:
+    for col_letter in ["I","J","K","L","M","N","O","P","Q","R","S"]:
+        ws.column_dimensions[col_letter].width = 28
+    for col_letter in ["T","U","V","W","X","Y","Z"]:
         ws.column_dimensions[col_letter].width = 11
     for idx in range(27, 42):
         from openpyxl.utils import get_column_letter
