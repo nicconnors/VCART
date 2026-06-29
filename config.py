@@ -27,23 +27,23 @@ OUTPUT = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\G
 # =============================================================================
 
 TERRITORIES = [
-    # (display_label,             filename,                                          terr_override)
-    ("VCART: National",           "National_VCART_VRHR_2026.xlsx",                  "VREJ01"),
-    ("VCART: Northeast",          "NortheastVCART_VRHR_20261.xlsx",                  "VREJ02"),
-    ("VCART: NYC North",          "NYCNorth_VCART_VRHR_202611_-_newest__1_.xlsx",    "VREJ03"),
-    ("VCART: NYC South",          "NYCSouth_VCART_VRHR_20262.xlsx",                  "VCNC05"),
-    ("VCART: Mid Atlantic",       "MidAtlantic_VCART_VRHR_20263.xlsx",               None),
-    ("VCART: SoCal",              "SoCal_VCART_VRHR_20264.xlsx",                     "VREK02"),
-    ("VCART: Central North",      "CentralNorth_VCART_VRHR_20265.xlsx",              "VREK03"),
-    ("VCART: Texas",              "Texas_VCART_VRHR_20266.xlsx",                     "VREK04"),
-    ("VCART: Mid South",          "MidSouth_VCART_VRHR_20267.xlsx",                  None),
-    ("VCART: Great Lakes",        "GreatLakes_VCART_VRHR_20268.xlsx",                "VREK05"),
-    ("VCART: Ohio Valley",        "OhioValley_VCART_VRHR_20269.xlsx",                "VREK06"),
-    ("VCART: New England",        "NewEngland_VCART_VRHR_202610.xlsx",               "VREJ08"),
-    ("VCART: Carolinas",          "Carolinas_VCART_VRHR_202631.xlsx",                "VREJ06"),
-    ("VCART: Southeast",          "SouthEast_VCART_VRHR_202632.xlsx",                "VREJ07"),
-    ("VCART: Central West",       "CentralWest_VCART_VRHR_202633.xlsx",              "VREK01"),
-    ("VCART: PacNW",              "PacNW_VCART_VRHR_202661.xlsx",                    "VREK07"),
+    # (display_label,             filename)
+    ("VCART: National",           "National_VCART_VRHR_2026.xlsx"),
+    ("VCART: Northeast",          "NortheastVCART_VRHR_20261.xlsx"),
+    ("VCART: NYC North",          "NYCNorth_VCART_VRHR_202611_-_newest__1_.xlsx"),
+    ("VCART: NYC South",          "NYCSouth_VCART_VRHR_20262.xlsx"),
+    ("VCART: Mid Atlantic",       "MidAtlantic_VCART_VRHR_20263.xlsx"),
+    ("VCART: SoCal",              "SoCal_VCART_VRHR_20264.xlsx"),
+    ("VCART: Central North",      "CentralNorth_VCART_VRHR_20265.xlsx"),
+    ("VCART: Texas",              "Texas_VCART_VRHR_20266.xlsx"),
+    ("VCART: Mid South",          "MidSouth_VCART_VRHR_20267.xlsx"),
+    ("VCART: Great Lakes",        "GreatLakes_VCART_VRHR_20268.xlsx"),
+    ("VCART: Ohio Valley",        "OhioValley_VCART_VRHR_20269.xlsx"),
+    ("VCART: New England",        "NewEngland_VCART_VRHR_202610.xlsx"),
+    ("VCART: Carolinas",          "Carolinas_VCART_VRHR_202631.xlsx"),
+    ("VCART: Southeast",          "SouthEast_VCART_VRHR_202632.xlsx"),
+    ("VCART: Central West",       "CentralWest_VCART_VRHR_202633.xlsx"),
+    ("VCART: PacNW",              "PacNW_VCART_VRHR_202661.xlsx"),
 ]
 
 # =============================================================================

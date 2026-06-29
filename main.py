@@ -75,7 +75,7 @@ def _section_fill(out_col, headers=None):
 # FILE READING
 # ---------------------------------------------------------------------------
 
-def read_territory_file(filepath, terr_label, terr_override):
+def read_territory_file(filepath, terr_label):
     """
     Read one territory VCART file.
     Returns:
@@ -111,7 +111,7 @@ def read_territory_file(filepath, terr_label, terr_override):
     # Read data rows (row 7 onward)
     # ------------------------------------------------------------------
     vcart_name = None
-    terr_num   = terr_override
+    terr_num   = None
     campus_rows = []
 
     all_rows = list(ws.iter_rows(min_row=DATA_START, values_only=True))
@@ -122,8 +122,8 @@ def read_territory_file(filepath, terr_label, terr_override):
         if all(v is None or v == "" for v in row[:SRC_DATA_END]):
             continue
 
-        # Territory # from col A (0-indexed: 0), fall back to override
-        if terr_num is None or terr_num == terr_override:
+        # Territory # from col A (0-indexed: 0)
+        if terr_num is None:
             if row[0] and str(row[0]).strip():
                 terr_num = str(row[0]).strip()
 
@@ -161,7 +161,7 @@ def read_territory_file(filepath, terr_label, terr_override):
         campus_rows.append(rd)
 
     if terr_num is None:
-        terr_num = terr_override or "UNKNOWN"
+        terr_num = "UNKNOWN"
     if vcart_name is None:
         vcart_name = terr_label
 
@@ -174,10 +174,9 @@ def load_all_territories(folder):
         label → {terr_num, vcart_name, campus_rows, totals, campus_count, region}
     """
     result = {}
-    for label, filename, terr_override in TERRITORIES:
+    for label, filename in TERRITORIES:
         filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
-            # try glob match in case filename differs slightly
             matches = glob.glob(os.path.join(folder, f"*{filename.split('_')[0]}*"))
             if matches:
                 filepath = matches[0]
@@ -189,7 +188,7 @@ def load_all_territories(folder):
 
         print(f"  Reading {label}...")
         terr_num, vcart_name, campus_rows, totals = read_territory_file(
-            filepath, label, terr_override
+            filepath, label
         )
         if campus_rows is None and not totals:
             result[label] = None
@@ -817,7 +816,7 @@ def build_systems_live_sheet(wb, all_td, snap_date):
 
     # Data rows
     current_row = 5
-    for label, filename, _ in TERRITORIES:
+    for label, filename in TERRITORIES:
         td = all_td.get(label)
         if td is None or not td["campus_rows"]:
             continue
@@ -902,7 +901,7 @@ def build_systems_snapshot_sheet(wb, all_td, snap_date, month_name):
     ws.row_dimensions[4].height = 80
 
     current_row = 5
-    for label, filename, _ in TERRITORIES:
+    for label, filename in TERRITORIES:
         td = all_td.get(label)
         if td is None or not td["campus_rows"]:
             continue
