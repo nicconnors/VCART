@@ -25,7 +25,7 @@ from config import (
 # =============================================================================
 # PATH TO OLD FILE — update if yours is named differently
 # =============================================================================
-OLD_FILE = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\General\(VRHR) ViiV Reimbursement Health Report\2026\Region_Nation_Totals.xlsx"
+OLD_FILE = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\General\(VRHR) ViiV Reimbursement Health Report\2026\Region.Nation.Totals.Old.xlsx"
 OLD_SHEET = "VCART Totals"
 
 # Old file layout: time series in col B (month name), col C (total barriers)
