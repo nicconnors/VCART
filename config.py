@@ -13,11 +13,43 @@ import os
 # =============================================================================
 # FILE PATHS
 # =============================================================================
+# NOTE: paths are built from the current user's home directory so this script
+# runs unmodified on any teammate's machine, as long as their OneDrive sync
+# creates the same "GSK\ViiV Field Reimbursement Managers - Documents\..."
+# folder structure under their own Windows profile.
+#
+# If your OneDrive sync root is NOT your home dir (e.g. it's redirected, or
+# your OneDrive folder is literally named "OneDrive - GSK" instead of "GSK"),
+# override BASE_DIR / OUTPUT via environment variables instead of editing
+# this file — see VCART_BASE_DIR / VCART_OUTPUT below.
+
+_SHAREPOINT_SUBPATH = os.path.join(
+    "GSK",
+    "ViiV Field Reimbursement Managers - Documents",
+    "General",
+    "(VRHR) ViiV Reimbursement Health Report",
+    "2026",
+)
+
+_DEFAULT_BASE_DIR = os.path.join(_SHAREPOINT_SUBPATH, "VCART VRHR")
+_DEFAULT_OUTPUT   = os.path.join(_SHAREPOINT_SUBPATH, "VCART.Region.Nation.Totals.New.xlsx")
+
+HOME = os.path.expanduser("~")
 
 # Root folder containing all per-territory VCART VRHR xlsx files
-BASE_DIR = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\General\(VRHR) ViiV Reimbursement Health Report\2026\VCART VRHR"
+BASE_DIR = os.environ.get("VCART_BASE_DIR", os.path.join(HOME, _DEFAULT_BASE_DIR))
 
-OUTPUT = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\General\(VRHR) ViiV Reimbursement Health Report\2026\VCART.Region.Nation.Totals.New.xlsx"
+OUTPUT = os.environ.get("VCART_OUTPUT", os.path.join(HOME, _DEFAULT_OUTPUT))
+
+if not os.path.isdir(BASE_DIR):
+    raise FileNotFoundError(
+        f"CONFIG ERROR: BASE_DIR not found:\n  {BASE_DIR}\n\n"
+        "This usually means your OneDrive sync folder isn't named 'GSK' under "
+        "your home directory. Fix by setting an environment variable instead "
+        "of editing config.py, e.g. in PowerShell:\n\n"
+        '  $env:VCART_BASE_DIR = "C:\\path\\to\\your\\VCART VRHR"\n'
+        '  $env:VCART_OUTPUT   = "C:\\path\\to\\your\\output.xlsx"\n'
+    )
 
 # =============================================================================
 # SOURCE FILES
@@ -28,22 +60,22 @@ OUTPUT = r"C:\Users\nc139629\GSK\ViiV Field Reimbursement Managers - Documents\G
 
 TERRITORIES = [
     # (display_label,             filename)
-    ("VCART: National",           "National_VCART_VRHR_2026.xlsx"),
-    ("VCART: Northeast",          "NortheastVCART_VRHR_20261.xlsx"),
-    ("VCART: NYC North",          "NYCNorth_VCART_VRHR_202611_-_newest__1_.xlsx"),
-    ("VCART: NYC South",          "NYCSouth_VCART_VRHR_20262.xlsx"),
-    ("VCART: Mid Atlantic",       "MidAtlantic_VCART_VRHR_20263.xlsx"),
-    ("VCART: SoCal",              "SoCal_VCART_VRHR_20264.xlsx"),
-    ("VCART: Central North",      "CentralNorth_VCART_VRHR_20265.xlsx"),
-    ("VCART: Texas",              "Texas_VCART_VRHR_20266.xlsx"),
-    ("VCART: Mid South",          "MidSouth_VCART_VRHR_20267.xlsx"),
-    ("VCART: Great Lakes",        "GreatLakes_VCART_VRHR_20268.xlsx"),
-    ("VCART: Ohio Valley",        "OhioValley_VCART_VRHR_20269.xlsx"),
-    ("VCART: New England",        "NewEngland_VCART_VRHR_202610.xlsx"),
-    ("VCART: Carolinas",          "Carolinas_VCART_VRHR_202631.xlsx"),
-    ("VCART: Southeast",          "SouthEast_VCART_VRHR_202632.xlsx"),
-    ("VCART: Central West",       "CentralWest_VCART_VRHR_202633.xlsx"),
-    ("VCART: PacNW",              "PacNW_VCART_VRHR_202661.xlsx"),
+    ("VCART: National",           "National.VCART.VRHR.2026.xlsx"),
+    ("VCART: Northeast",          "NortheastVCART.VRHR.20261.xlsx"),
+    ("VCART: NYC North",          "NYCNorth.VCART.VRHR.202611.xlsx"),
+    ("VCART: NYC South",          "NYCSouth.VCART.VRHR.20262.xlsx"),
+    ("VCART: Mid Atlantic",       "MidAtlantic.VCART.VRHR.20263.xlsx"),
+    ("VCART: SoCal",              "SoCal.VCART.VRHR.20264.xlsx"),
+    ("VCART: Central North",      "CentralNorth.VCART.VRHR.20265.xlsx"),
+    ("VCART: Texas",              "Texas.VCART.VRHR.20266.xlsx"),
+    ("VCART: Mid South",          "MidSouth.VCART.VRHR.20267.xlsx"),
+    ("VCART: Great Lakes",        "GreatLakes.VCART.VRHR.20268.xlsx"),
+    ("VCART: Ohio Valley",        "OhioValley.VCART.VRHR.20269.xlsx"),
+    ("VCART: New England",        "NewEngland.VCART.VRHR.202610.xlsx"),
+    ("VCART: Carolinas",          "Carolinas.VCART.VRHR.202631.xlsx"),
+    ("VCART: Southeast",          "SouthEast.VCART.VRHR.202632.xlsx"),
+    ("VCART: Central West",       "CentralWest.VCART.VRHR.202633.xlsx"),
+    ("VCART: PacNW",              "PacNW.VCART.VRHR.202661.xlsx"),
 ]
 
 # =============================================================================

@@ -12,6 +12,7 @@ campus-level data into a single workbook with:
 
 import os
 import glob
+import re
 import traceback
 import warnings
 from copy import copy
@@ -320,11 +321,6 @@ def write_col_headers(ws, row, headers=None):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.fill = _section_fill(col, headers)
     ws.row_dimensions[row].height = 80
-    if "East" in region:
-        return PatternFill("solid", fgColor=EAST_FILL)
-    if "West" in region:
-        return PatternFill("solid", fgColor=WEST_FILL)
-    return PatternFill(fill_type=None)
 
 
 def write_territory_row(ws, row_num, label, td, raw=True):
@@ -699,13 +695,18 @@ def read_existing_totals(filepath):
                 )
 
         # Live month name
+        # NOTE: the LIVE label looks like "LIVE - refreshed 6.30.26" — it never
+        # contains a month name as text, so searching for a name (e.g. "June")
+        # always fails silently and live_month stays None. Instead, pull the
+        # month number out of the m.d.yy date in the label itself.
         for r in range(1, ws.max_row + 1):
             v = str(ws.cell(row=r, column=1).value or "")
             if "live" in v.lower():
-                for m in MONTH_NAMES:
-                    if m.lower() in v.lower():
-                        live_month = m
-                        break
+                date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", v)
+                if date_match:
+                    month_num = int(date_match.group(1))
+                    if 1 <= month_num <= 12:
+                        live_month = MONTH_NAMES[month_num - 1]
                 break
 
         # Snapshots
