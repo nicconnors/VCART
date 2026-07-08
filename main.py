@@ -67,6 +67,26 @@ def _section_fill(out_col, headers=None):
     return PatternFill(fill_type=None)
 
 
+def _shift_section_headers(headers, offset):
+    """
+    SECTION_HEADERS column ranges are calibrated for the VCART Totals sheet,
+    where data columns start at OUT_DATA_START (6). The VCART Systems sheets
+    have 8 demographic columns (not 5), so their data starts 3 columns later
+    at SRC_DATA_START (9). Passing SECTION_HEADERS to write_section_headers()
+    unshifted paints the row-3 color band 3 columns too far left — bleeding
+    color onto City/State/Zip and cutting off the last 3 columns of each
+    section. This shifts every range by `offset` so the band lines up with
+    the actual columns used on that sheet.
+    """
+    return [(start + offset, end + offset, label, color) for start, end, label, color in headers]
+
+
+# Systems sheets (VCART Systems - LIVE / snapshot) have their data columns
+# shifted right by this many columns relative to the VCART Totals sheet.
+SYSTEMS_COL_OFFSET = SRC_DATA_START - OUT_DATA_START  # 9 - 6 = 3
+SYSTEMS_SECTION_HEADERS = _shift_section_headers(SECTION_HEADERS, SYSTEMS_COL_OFFSET)
+
+
 # ---------------------------------------------------------------------------
 # FILE READING
 # ---------------------------------------------------------------------------
@@ -640,6 +660,89 @@ def append_snapshot(ws, all_td, snap_date, live_month):
     write_nation_row(ws, r, all_td, raw=False)
 
 
+def restore_snapshot(ws, snap_start_row, snap_rows):
+    """
+    Rebuild one preserved snapshot block using the SAME writer functions
+    as append_snapshot() (write_section_headers / write_col_headers /
+    write_territory_row / write_nation_row), instead of copying raw
+    .value data into blank cells.
+
+    This guarantees restored snapshots always come out with identical
+    fonts, fills, alignment, number formats, and column widths to a
+    freshly written snapshot — fixing the bug where re-running the
+    aggregator stripped all formatting from previously saved snapshots.
+
+    snap_rows is the list of row-value-lists captured by
+    read_existing_totals() for this snapshot block. Only the label row
+    and the RAW territory rows are used; the % section, section headers,
+    and NATION row are all recomputed fresh (NATION and % are derived
+    values anyway, so recomputing them from the raw rows reproduces the
+    original numbers exactly).
+
+    Returns the row number of the last row written (the % NATION row).
+    """
+    N = NUM_TERRITORIES
+
+    # --- offsets within a snapshot block (0-based), matching append_snapshot ---
+    #   0            label row
+    #   1            section headers (raw)
+    #   2            col headers (raw)
+    #   3..3+N-1     territory rows (raw)
+    #   3+N          NATION row (raw)
+    #   4+N          blank
+    #   5+N          section headers (pct)
+    #   6+N          col headers (pct)
+    #   7+N..6+2N    territory rows (pct)
+    #   7+2N         NATION row (pct)
+
+    label_row = snap_rows[0] if len(snap_rows) > 0 else [None, None]
+    label_text    = label_row[0] if len(label_row) > 0 else None
+    barriers_text = label_row[1] if len(label_row) > 1 else None
+
+    # Rebuild a td-like dict per territory from the stored RAW rows only.
+    snap_td = {}
+    for i, (label, *_rest) in enumerate(TERRITORIES):
+        idx = 3 + i
+        row_vals = snap_rows[idx] if idx < len(snap_rows) else None
+        if not row_vals:
+            continue
+        def _val(col):
+            j = col - 1
+            return row_vals[j] if j < len(row_vals) else None
+
+        totals = {out_col: _val(out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
+        campus_ct = _val(OUT_CAMPUS_COL)
+        snap_td[label] = {
+            "terr_num":     _val(OUT_TERR_COL),
+            "vcart_name":   _val(OUT_NAME_COL),
+            "campus_count": campus_ct if isinstance(campus_ct, (int, float)) else 0,
+            "region":       _val(OUT_LABEL_COL) or REGION_MAP.get(label, ""),
+            "totals":       totals,
+        }
+
+    row = snap_start_row
+    ws.cell(row=row, column=1, value=label_text).fill = PatternFill("solid", fgColor=YELLOW)
+    ws.cell(row=row, column=1).font = Font(size=11)
+    ws.cell(row=row, column=2, value=barriers_text).font = Font(size=11)
+    row += 1
+
+    write_section_headers(ws, row); row += 1
+    write_col_headers(ws, row);    row += 1
+    for i, (label, *_rest) in enumerate(TERRITORIES):
+        write_territory_row(ws, row + i, label, snap_td.get(label), raw=True)
+    row += N
+    write_nation_row(ws, row, snap_td, raw=True); row += 2
+
+    write_section_headers(ws, row); row += 1
+    write_col_headers(ws, row);    row += 1
+    for i, (label, *_rest) in enumerate(TERRITORIES):
+        write_territory_row(ws, row + i, label, snap_td.get(label), raw=False)
+    row += N
+    write_nation_row(ws, row, snap_td, raw=False)
+
+    return row
+
+
 def _trim_snapshots(ws, keep=11):
     snap_start = get_snap_start(ws)
     snap_rows  = find_yellow_rows(ws, snap_start, ws.max_row)
@@ -779,8 +882,9 @@ def build_systems_live_sheet(wb, all_td, snap_date):
         ws.cell(row=totals_label_row, column=9 + out_col_offset,
                 value=nation_barriers[i]).font = Font(size=9, bold=True)
 
-    # Section header row 3
-    write_section_headers(ws, 3)
+    # Section header row 3 (shifted +3 cols — Systems sheet has 8 demographic
+    # cols instead of 5, so data starts later than on the VCART Totals sheet)
+    write_section_headers(ws, 3, headers=SYSTEMS_SECTION_HEADERS)
 
     # Column header row 4
     # Campus-level headers: cols A-H = demographics, then data cols I-AR
@@ -849,6 +953,7 @@ def build_systems_live_sheet(wb, all_td, snap_date):
     from openpyxl.utils import get_column_letter
     for i in range(9, 45):
         ws.column_dimensions[get_column_letter(i)].width = 12
+    ws.column_dimensions["AR"].width = 20  # Last Update — needs extra room
 
     print(f"    VCART Systems - LIVE: {current_row - 5} campus rows written")
 
@@ -877,12 +982,8 @@ def build_systems_snapshot_sheet(wb, all_td, snap_date, month_name):
     for i, bc in enumerate(BARRIER_COLS_OUT):
         ws.cell(row=2, column=9 + (bc - OUT_DATA_START), value=nation_barriers[i]).font = Font(size=9, bold=True)
 
-    write_section_headers(ws, 3)
-
-    campus_hdrs = {
-        1: "VCART Territory #", 2: "VCART Name", 3: "Corporate\nParent CID",
-        4: "Corporate\nParent Name", 5: "Address", 6: "City", 7: "State", 8: "Zip",
-    }
+    # Shifted +3 cols — same reason as build_systems_live_sheet
+    write_section_headers(ws, 3, headers=SYSTEMS_SECTION_HEADERS)
     for col, text in campus_hdrs.items():
         cell = ws.cell(row=4, column=col, value=text)
         cell.font = Font(size=9)
@@ -930,12 +1031,21 @@ def build_systems_snapshot_sheet(wb, all_td, snap_date, month_name):
     ws.column_dimensions["H"].width = 7
     for i in range(9, 45):
         ws.column_dimensions[get_column_letter(i)].width = 12
+    ws.column_dimensions["AR"].width = 20  # Last Update — needs extra room
 
     print(f"        {sheet_name}: {current_row - 5} campus rows written")
 
 
 def copy_existing_systems_sheets(src_filepath, dst_wb):
-    """Copy any existing 'VCART Systems - Mon YYYY' snapshot sheets into the new workbook."""
+    """Copy any existing 'VCART Systems - Mon YYYY' snapshot sheets into the new workbook.
+
+    Copies cell values + styles (font/fill/alignment/number_format), AND
+    the sheet-level formatting that lives outside individual cells:
+    column widths, row heights, and merged cell ranges (the section header
+    row uses merged cells). Without these, restored snapshot sheets would
+    silently lose their column sizing / row heights / merges on every run,
+    even though the per-cell styling looked fine.
+    """
     if not os.path.exists(src_filepath):
         return
     try:
@@ -947,6 +1057,7 @@ def copy_existing_systems_sheets(src_filepath, dst_wb):
                     continue
                 ws_src = wb_src[sname]
                 ws_dst = dst_wb.create_sheet(sname)
+
                 for row in ws_src.iter_rows():
                     for cell in row:
                         dst_cell = ws_dst.cell(row=cell.row, column=cell.column, value=cell.value)
@@ -955,7 +1066,26 @@ def copy_existing_systems_sheets(src_filepath, dst_wb):
                             dst_cell.font          = _copy(cell.font)
                             dst_cell.fill          = _copy(cell.fill)
                             dst_cell.alignment     = _copy(cell.alignment)
+                            dst_cell.border        = _copy(cell.border)
                             dst_cell.number_format = cell.number_format
+
+                # Column widths
+                for col_letter, dim in ws_src.column_dimensions.items():
+                    if dim.width:
+                        ws_dst.column_dimensions[col_letter].width = dim.width
+
+                # Row heights
+                for row_idx, dim in ws_src.row_dimensions.items():
+                    if dim.height:
+                        ws_dst.row_dimensions[row_idx].height = dim.height
+
+                # Merged cell ranges (e.g. section header row)
+                for merged_range in ws_src.merged_cells.ranges:
+                    try:
+                        ws_dst.merge_cells(str(merged_range))
+                    except Exception:
+                        pass
+
                 copied += 1
                 print(f"        Copied sheet: {sname}")
         wb_src.close()
@@ -1054,21 +1184,16 @@ def main():
     write_live_section(ws_totals, all_td, snap_date)
     print(f"        LIVE section done.")
 
-    # Restore existing snapshots
+    # Restore existing snapshots — rebuilt via the same writer functions used
+    # to create a fresh snapshot, so formatting always matches (see
+    # restore_snapshot() docstring for why).
     if existing_snaps:
         print(f"\n  [3/4] Restoring {len(existing_snaps)} existing snapshot(s)...")
         next_snap_row = get_snap_start(ws_totals)
         for idx, snap in enumerate(existing_snaps):
             label = str(snap[0][0]) if snap and snap[0][0] else f"snapshot {idx+1}"
-            r = next_snap_row
-            for row_data in snap:
-                for c_idx, val in enumerate(row_data, 1):
-                    try:
-                        ws_totals.cell(row=r, column=c_idx, value=val)
-                    except Exception:
-                        pass
-                r += 1
-            next_snap_row = r + 1
+            last_row = restore_snapshot(ws_totals, next_snap_row, snap)
+            next_snap_row = last_row + 2  # one blank separator row, same as append_snapshot
             print(f"        Restored: {label}")
     else:
         print(f"\n  [3/4] No existing snapshots to restore.")

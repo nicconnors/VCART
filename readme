@@ -20,7 +20,7 @@ Reads per-territory VCART VRHR Excel files and aggregates them into a single out
 
 Before running the script, you need the VCART VRHR files available locally. In Teams or SharePoint:
 
-1. Go to **ViiV Field Reimbursement Managers → General → Documents → (VRHR) ViiV Reimbursement Health Report → 2026**
+1. Go to **ViiV Field Reimbursement Managers - 2026**
 2. Navigate to the **VCART VRHR** folder
 3. Click **Sync** (not Download) — if you don't see it, check the `...` menu or right-click the folder. If it's still missing entirely, sync may be disabled by IT policy for this site.
 
@@ -28,7 +28,7 @@ Before running the script, you need the VCART VRHR files available locally. In T
 - **Sync** mirrors the folder locally and keeps it updated automatically in the background as teammates edit source files. This is what the script expects — use this one.
 - **Download** grabs a one-time static zip copy that never updates again. Don't use this — you'd have to manually re-download every time source files change.
 
-Once synced, the folder appears locally at `C:\Users\<yourname>\GSK\ViiV Field Reimbursement Managers - Documents\...` and `config.py` finds it automatically — no path editing needed.
+Once synced, the folder appears locally at `C:\Users\<yourname>\GSK\ViiV Field Reimbursement Managers - 2026\...` and `config.py` finds it automatically — no path editing needed.
 
 > Note: sync isn't instant. If you run the script right after a teammate edits a file, give OneDrive a minute to catch up before running, or the script may pick up stale data.
 
@@ -40,7 +40,7 @@ Once synced, the folder appears locally at `C:\Users\<yourname>\GSK\ViiV Field R
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install openpyxl
 ```
-3. `config.py` auto-detects `BASE_DIR` and `OUTPUT` from your home directory once the folder above is synced — no changes needed. If it can't find the folder (e.g. your OneDrive folder isn't named `GSK`), it'll raise a clear error telling you which environment variable to set instead.
+3. `config.py` auto-detects `BASE_DIR` and `OUTPUT` from your home directory once the folder above is synced — no changes needed. If it can't find the folder (e.g. your OneDrive folder isn't named `GSK`, or the sync folder name has changed), it'll raise a clear error telling you which environment variable to set instead.
 
 ---
 
@@ -95,7 +95,7 @@ All settings live in `config.py`. Key things to update:
 
 **Changing output location:** Update `OUTPUT` path, or set the `VCART_OUTPUT` environment variable.
 
-**Changing source file folder:** Update `BASE_DIR` path, or set the `VCART_BASE_DIR` environment variable (useful if your OneDrive sync folder isn't named `GSK`).
+**Changing source file folder:** Update `BASE_DIR` path, or set the `VCART_BASE_DIR` environment variable (useful if your OneDrive sync folder isn't named `GSK`, or if the sync folder name changes).
 
 ---
 

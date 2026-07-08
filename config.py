@@ -15,20 +15,17 @@ import os
 # =============================================================================
 # NOTE: paths are built from the current user's home directory so this script
 # runs unmodified on any teammate's machine, as long as their OneDrive sync
-# creates the same "GSK\ViiV Field Reimbursement Managers - Documents\..."
+# creates the same "GSK\ViiV Field Reimbursement Managers - 2026\..."
 # folder structure under their own Windows profile.
 #
 # If your OneDrive sync root is NOT your home dir (e.g. it's redirected, or
-# your OneDrive folder is literally named "OneDrive - GSK" instead of "GSK"),
-# override BASE_DIR / OUTPUT via environment variables instead of editing
-# this file — see VCART_BASE_DIR / VCART_OUTPUT below.
+# your OneDrive folder has a different name), override BASE_DIR / OUTPUT via
+# environment variables instead of editing this file — see VCART_BASE_DIR /
+# VCART_OUTPUT below.
 
 _SHAREPOINT_SUBPATH = os.path.join(
     "GSK",
-    "ViiV Field Reimbursement Managers - Documents",
-    "General",
-    "(VRHR) ViiV Reimbursement Health Report",
-    "2026",
+    "ViiV Field Reimbursement Managers - 2026",
 )
 
 _DEFAULT_BASE_DIR = os.path.join(_SHAREPOINT_SUBPATH, "VCART VRHR")
@@ -45,8 +42,9 @@ if not os.path.isdir(BASE_DIR):
     raise FileNotFoundError(
         f"CONFIG ERROR: BASE_DIR not found:\n  {BASE_DIR}\n\n"
         "This usually means your OneDrive sync folder isn't named 'GSK' under "
-        "your home directory. Fix by setting an environment variable instead "
-        "of editing config.py, e.g. in PowerShell:\n\n"
+        "your home directory, or the 'VCART VRHR' subfolder isn't where "
+        "expected. Fix by setting an environment variable instead of editing "
+        "config.py, e.g. in PowerShell:\n\n"
         '  $env:VCART_BASE_DIR = "C:\\path\\to\\your\\VCART VRHR"\n'
         '  $env:VCART_OUTPUT   = "C:\\path\\to\\your\\output.xlsx"\n'
     )
