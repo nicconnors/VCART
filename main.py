@@ -673,11 +673,17 @@ def restore_snapshot(ws, snap_start_row, snap_rows):
     aggregator stripped all formatting from previously saved snapshots.
 
     snap_rows is the list of row-value-lists captured by
-    read_existing_totals() for this snapshot block. Only the label row
-    and the RAW territory rows are used; the % section, section headers,
-    and NATION row are all recomputed fresh (NATION and % are derived
-    values anyway, so recomputing them from the raw rows reproduces the
-    original numbers exactly).
+    read_existing_totals() for this snapshot block. The RAW territory
+    rows drive the recomputed numbers (NATION and % are derived values,
+    so recomputing them from the raw rows reproduces the original
+    numbers exactly in the normal case). The previously-stored PCT rows
+    are also captured (prior_pct_td / prior_pct_nation below) and used
+    as a fallback wherever the raw-based recompute would otherwise leave
+    a % cell blank — e.g. a cell you manually filled in directly on the
+    % side because the raw source data was never available for it.
+    Without this fallback, any such manual edit gets silently discarded
+    on every re-run, since the % section used to be recomputed from raw
+    alone with no way to fall back to what was already saved.
 
     Returns the row number of the last row written (the % NATION row).
     """
@@ -699,6 +705,10 @@ def restore_snapshot(ws, snap_start_row, snap_rows):
     label_text    = label_row[0] if len(label_row) > 0 else None
     barriers_text = label_row[1] if len(label_row) > 1 else None
 
+    def _row_val(row_vals, col):
+        j = col - 1
+        return row_vals[j] if row_vals and j < len(row_vals) else None
+
     # Rebuild a td-like dict per territory from the stored RAW rows only.
     snap_td = {}
     for i, (label, *_rest) in enumerate(TERRITORIES):
@@ -706,19 +716,31 @@ def restore_snapshot(ws, snap_start_row, snap_rows):
         row_vals = snap_rows[idx] if idx < len(snap_rows) else None
         if not row_vals:
             continue
-        def _val(col):
-            j = col - 1
-            return row_vals[j] if j < len(row_vals) else None
 
-        totals = {out_col: _val(out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
-        campus_ct = _val(OUT_CAMPUS_COL)
+        totals = {out_col: _row_val(row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
+        campus_ct = _row_val(row_vals, OUT_CAMPUS_COL)
         snap_td[label] = {
-            "terr_num":     _val(OUT_TERR_COL),
-            "vcart_name":   _val(OUT_NAME_COL),
+            "terr_num":     _row_val(row_vals, OUT_TERR_COL),
+            "vcart_name":   _row_val(row_vals, OUT_NAME_COL),
             "campus_count": campus_ct if isinstance(campus_ct, (int, float)) else 0,
-            "region":       _val(OUT_LABEL_COL) or REGION_MAP.get(label, ""),
+            "region":       _row_val(row_vals, OUT_LABEL_COL) or REGION_MAP.get(label, ""),
             "totals":       totals,
         }
+
+    # Previously-stored PCT rows — captured so manually-entered % values can
+    # survive even when the raw side has nothing to recompute them from.
+    prior_pct_td = {}
+    for i, (label, *_rest) in enumerate(TERRITORIES):
+        idx = 7 + N + i
+        row_vals = snap_rows[idx] if idx < len(snap_rows) else None
+        if not row_vals:
+            continue
+        prior_pct_td[label] = {out_col: _row_val(row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
+
+    nation_idx = 7 + 2 * N
+    nation_pct_row_vals = snap_rows[nation_idx] if nation_idx < len(snap_rows) else None
+    prior_pct_nation = {out_col: _row_val(nation_pct_row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)} \
+        if nation_pct_row_vals else {}
 
     row = snap_start_row
     ws.cell(row=row, column=1, value=label_text).fill = PatternFill("solid", fgColor=YELLOW)
@@ -737,8 +759,24 @@ def restore_snapshot(ws, snap_start_row, snap_rows):
     write_col_headers(ws, row);    row += 1
     for i, (label, *_rest) in enumerate(TERRITORIES):
         write_territory_row(ws, row + i, label, snap_td.get(label), raw=False)
+        # Fallback: any % cell that came out blank because the raw value was
+        # missing gets restored from whatever was already saved for it —
+        # preserves manual edits made directly to % cells.
+        prior = prior_pct_td.get(label, {})
+        for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1):
+            cell = ws.cell(row=row + i, column=out_col)
+            if cell.value is None and prior.get(out_col) is not None:
+                cell.value = prior.get(out_col)
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "0%"
     row += N
     write_nation_row(ws, row, snap_td, raw=False)
+    for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1):
+        cell = ws.cell(row=row, column=out_col)
+        if cell.value is None and prior_pct_nation.get(out_col) is not None:
+            cell.value = prior_pct_nation.get(out_col)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "0%"
 
     return row
 
