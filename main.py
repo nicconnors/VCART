@@ -1,15 +1,3 @@
-"""
-VCART VRHR Aggregator
-=====================
-Reads the VRHR.VCART sheet from each per-territory file, aggregates
-campus-level data into a single workbook with:
-  - "VCART Totals" sheet  — territory-level summary (raw + %) with
-    monthly time series and snapshot history
-  - "VCART Systems - LIVE" sheet — campus-level live data (all rows)
-  - Snapshot preservation and monthly rollover
-
-"""
-
 import os
 import glob
 import re
@@ -22,6 +10,7 @@ from collections import Counter
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import LineChart, Reference
+from openpyxl.utils import get_column_letter
 
 from config import (
     BASE_DIR, OUTPUT,
@@ -85,6 +74,11 @@ def _shift_section_headers(headers, offset):
 # shifted right by this many columns relative to the VCART Totals sheet.
 SYSTEMS_COL_OFFSET = SRC_DATA_START - OUT_DATA_START  # 9 - 6 = 3
 SYSTEMS_SECTION_HEADERS = _shift_section_headers(SECTION_HEADERS, SYSTEMS_COL_OFFSET)
+
+# All-borders styling used by finalize_workbook_formatting()
+ALL_BORDER_SIDE = Side(style="thin", color="000000")
+ALL_BORDERS = Border(left=ALL_BORDER_SIDE, right=ALL_BORDER_SIDE,
+                      top=ALL_BORDER_SIDE, bottom=ALL_BORDER_SIDE)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +286,51 @@ def find_yellow_rows(ws, start_row, end_row):
     return yellow_rows
 
 
+def _autofit_column_widths(ws, min_width=6, max_width=32, padding=2):
+    """Set each column's width from the content actually in it, instead of
+    guessing fixed width tiers per column range — those guesses drift out
+    of sync the moment column contents change and have to be re-guessed
+    by hand every time.
+
+    Data cells drive the width primarily. Header cells (identified by
+    wrap_text=True, which every header in this workbook is built with)
+    only contribute a FLOOR based on their longest individual word, not
+    their full text — so a narrow, mostly-boolean column doesn't get
+    stretched wide just because its header is a long phrase, but also
+    doesn't shrink so far that the header wraps mid-word into unreadable
+    fragments (e.g. "Financial & Reimb. Challenges" wrapping down to
+    "Challeng" / "es"). Cells inside a merged range (title block, section
+    color band) are excluded entirely, since their text already spans
+    multiple columns and isn't tied to any single one.
+    """
+    merged_coords = set()
+    for mr in ws.merged_cells.ranges:
+        for row in ws.iter_rows(min_row=mr.min_row, max_row=mr.max_row,
+                                 min_col=mr.min_col, max_col=mr.max_col):
+            for cell in row:
+                merged_coords.add(cell.coordinate)
+
+    data_widths = {}
+    header_word_floor = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None or cell.coordinate in merged_coords:
+                continue
+            text = str(cell.value)
+            is_header = bool(cell.alignment and cell.alignment.wrap_text)
+            if is_header:
+                words = re.split(r"[\s\n]+", text)
+                longest_word = max((len(w) for w in words if w), default=0)
+                header_word_floor[cell.column] = max(header_word_floor.get(cell.column, 0), longest_word)
+            else:
+                longest_line = max((len(line) for line in text.split("\n")), default=0)
+                data_widths[cell.column] = max(data_widths.get(cell.column, 0), longest_line)
+
+    for col in set(data_widths) | set(header_word_floor):
+        length = max(data_widths.get(col, 0), header_word_floor.get(col, 0))
+        ws.column_dimensions[get_column_letter(col)].width = max(min_width, min(length + padding, max_width))
+
+
 # ---------------------------------------------------------------------------
 # TABLE WRITERS — VCART Totals sheet
 # ---------------------------------------------------------------------------
@@ -493,7 +532,6 @@ def write_totals_sheet_headers(ws):
     for col_letter in ["T","U","V","W","X","Y","Z"]:
         ws.column_dimensions[col_letter].width = 11
     for idx in range(27, 42):
-        from openpyxl.utils import get_column_letter
         ws.column_dimensions[get_column_letter(idx)].width = 11
 
 
@@ -599,186 +637,135 @@ def update_time_series(ws, all_td, snap_date):
 
 
 # ---------------------------------------------------------------------------
+# ROW SHIFT HELPER
+# ---------------------------------------------------------------------------
+
+def _shift_rows_down(ws, start_row, end_row, delta):
+    """Physically move every row in [start_row, end_row] down by `delta`
+    rows — values, styles, row heights, and merged ranges — clearing the
+    vacated original rows. No-op if delta <= 0 or the range is empty.
+
+    Used for two purposes:
+      1. Making room right after the time-series block grows by one row
+         (shifts the LIVE section and every snapshot block below it down
+         by 1 to stay immediately below the filled time-series rows).
+      2. Making room for a newly-frozen snapshot block (shifts all
+         previously-frozen snapshot blocks down by one block's worth of
+         rows).
+    Processes rows from end_row down to start_row so overlapping
+    source/destination ranges (delta smaller than the range itself) never
+    read a row that's already been overwritten.
+    """
+    if delta <= 0 or end_row < start_row:
+        return
+
+    # Move merged ranges within the region first (openpyxl won't let you
+    # write into cells that are still merged from a stale position).
+    merges = [mr for mr in list(ws.merged_cells.ranges)
+              if mr.min_row >= start_row and mr.max_row <= end_row]
+    for mr in merges:
+        ws.unmerge_cells(str(mr))
+
+    for r in range(end_row, start_row - 1, -1):
+        ws.row_dimensions[r + delta].height = ws.row_dimensions[r].height
+        for c in range(1, MAX_OUT_COL + 1):
+            src = ws.cell(row=r, column=c)
+            dst = ws.cell(row=r + delta, column=c)
+            dst.value = src.value
+            if src.has_style:
+                dst.font          = copy(src.font)
+                dst.fill          = copy(src.fill)
+                dst.border        = copy(src.border)
+                dst.alignment     = copy(src.alignment)
+                dst.number_format = src.number_format
+            src.value = None
+            src.fill  = PatternFill(fill_type=None)
+            src.font  = Font()
+            src.border = Border()
+            src.alignment = Alignment()
+            src.number_format = "General"
+
+    for mr in merges:
+        ws.merge_cells(start_row=mr.min_row + delta, start_column=mr.min_col,
+                       end_row=mr.max_row + delta, end_column=mr.max_col)
+
+
+# ---------------------------------------------------------------------------
 # SNAPSHOT MANAGEMENT
 # ---------------------------------------------------------------------------
 
-def append_snapshot(ws, all_td, snap_date, live_month):
-    snap_start = get_snap_start(ws)
-    block_size = 1 + (1 + 1 + NUM_TERRITORIES + 1) + 1 + 1 + (1 + 1 + NUM_TERRITORIES + 1) + 1
+def freeze_live_as_snapshot(ws, live_month, snap_date):
+    """
+    On month rollover, take the CURRENT LIVE section — the actual rows
+    already sitting in the sheet — and move them down to become the newest
+    frozen snapshot block, then relabel the moved label row.
 
-    max_row = ws.max_row
-    for r in range(max_row, snap_start - 1, -1):
-        ws.row_dimensions[r + block_size].height = ws.row_dimensions[r].height
+    This replaces the old append_snapshot()/restore_snapshot() pair, which
+    recomputed every snapshot from captured raw values every single run
+    (rebuilding the whole workbook from scratch each time). Since the
+    script now edits the existing file in place, the outgoing month's data
+    is already sitting in the LIVE section with correct formatting — moving
+    those exact rows is a real cut/paste, not a recompute, so nothing can
+    drift from what LIVE actually showed at the moment of rollover.
+
+    Must be called with `ws` already reflecting any time-series-growth
+    shift (see main()), and BEFORE write_live_section() writes the new
+    month's data into the (now vacated) LIVE position.
+    """
+    o = get_live_offsets(ws)
+    live_start = o["live_row"]
+    live_end   = o["pct_nat_row"] + 1  # includes the blank spacer row after PCT NATION
+    block_size = live_end - live_start + 1
+
+    snap_start = get_snap_start(ws)
+
+    # Make room: shift every already-frozen snapshot block down by block_size.
+    _shift_rows_down(ws, snap_start, ws.max_row, block_size)
+
+    # Move the LIVE block itself down into the vacated snapshot slot. Source
+    # and destination ranges are disjoint (there's always a blank-row gap
+    # between the LIVE section and the first snapshot), so a plain
+    # copy-then-clear is safe regardless of order.
+    live_merges = [mr for mr in list(ws.merged_cells.ranges)
+                   if live_start <= mr.min_row <= live_end]
+    for mr in live_merges:
+        ws.unmerge_cells(str(mr))
+
+    offset = snap_start - live_start
+    for i in range(block_size):
+        src_row = live_start + i
+        dst_row = snap_start + i
+        ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
         for c in range(1, MAX_OUT_COL + 1):
-            try:
-                src = ws.cell(row=r, column=c)
-                dst = ws.cell(row=r + block_size, column=c)
-                dst.value = src.value
-                if src.has_style:
-                    dst.font          = copy(src.font)
-                    dst.fill          = copy(src.fill)
-                    dst.border        = copy(src.border)
-                    dst.alignment     = copy(src.alignment)
-                    dst.number_format = src.number_format
-                src.value = None
-                src.fill  = PatternFill(fill_type=None)
-                src.font  = Font()
-                src.border = Border()
-                src.alignment = Alignment()
-                src.number_format = "General"
-            except Exception:
-                pass
+            src = ws.cell(row=src_row, column=c)
+            dst = ws.cell(row=dst_row, column=c)
+            dst.value = src.value
+            if src.has_style:
+                dst.font          = copy(src.font)
+                dst.fill          = copy(src.fill)
+                dst.border        = copy(src.border)
+                dst.alignment     = copy(src.alignment)
+                dst.number_format = src.number_format
+            src.value = None
+            src.fill  = PatternFill(fill_type=None)
+            src.font  = Font()
+            src.border = Border()
+            src.alignment = Alignment()
+            src.number_format = "General"
+
+    for mr in live_merges:
+        ws.merge_cells(start_row=mr.min_row + offset, start_column=mr.min_col,
+                       end_row=mr.max_row + offset, end_column=mr.max_col)
+
+    # Relabel the moved label row: "LIVE - refreshed ..." → "{Month} snapshot (...)"
+    date_str = snap_date.strftime("%m/%d/%y")
+    ws.cell(row=snap_start, column=1, value=f"{live_month} snapshot ({date_str})")
+    barriers_val = ws.cell(row=snap_start, column=2).value
+    m = re.search(r"(\d+)", str(barriers_val) or "")
+    if m:
+        ws.cell(row=snap_start, column=2, value=f"Total barriers - {m.group(1)}")
 
     _trim_snapshots(ws, keep=11)
-
-    date_str = snap_date.strftime("%m/%d/%y")
-    total_barriers = sum(
-        sum(td["totals"].get(c, 0) or 0 for c in BARRIER_COLS_OUT
-            if isinstance(td["totals"].get(c), (int, float)))
-        for td in all_td.values() if td
-    )
-
-    r = snap_start
-    ws.cell(row=r, column=1,
-            value=f"{live_month} snapshot ({date_str})").fill = PatternFill("solid", fgColor=YELLOW)
-    ws.cell(row=r, column=1).font = Font(size=11)
-    ws.cell(row=r, column=2, value=f"Total barriers - {total_barriers}").font = Font(size=11)
-    r += 1
-
-    write_section_headers(ws, r); r += 1
-    write_col_headers(ws, r);    r += 1
-    for i, (label, *_) in enumerate(TERRITORIES):
-        write_territory_row(ws, r + i, label, all_td.get(label), raw=True)
-    r += NUM_TERRITORIES
-    write_nation_row(ws, r, all_td, raw=True); r += 2
-
-    write_section_headers(ws, r); r += 1
-    write_col_headers(ws, r);    r += 1
-    for i, (label, *_) in enumerate(TERRITORIES):
-        write_territory_row(ws, r + i, label, all_td.get(label), raw=False)
-    r += NUM_TERRITORIES
-    write_nation_row(ws, r, all_td, raw=False)
-
-
-def restore_snapshot(ws, snap_start_row, snap_rows):
-    """
-    Rebuild one preserved snapshot block using the SAME writer functions
-    as append_snapshot() (write_section_headers / write_col_headers /
-    write_territory_row / write_nation_row), instead of copying raw
-    .value data into blank cells.
-
-    This guarantees restored snapshots always come out with identical
-    fonts, fills, alignment, number formats, and column widths to a
-    freshly written snapshot — fixing the bug where re-running the
-    aggregator stripped all formatting from previously saved snapshots.
-
-    snap_rows is the list of row-value-lists captured by
-    read_existing_totals() for this snapshot block. The RAW territory
-    rows drive the recomputed numbers (NATION and % are derived values,
-    so recomputing them from the raw rows reproduces the original
-    numbers exactly in the normal case). The previously-stored PCT rows
-    are also captured (prior_pct_td / prior_pct_nation below) and used
-    as a fallback wherever the raw-based recompute would otherwise leave
-    a % cell blank — e.g. a cell you manually filled in directly on the
-    % side because the raw source data was never available for it.
-    Without this fallback, any such manual edit gets silently discarded
-    on every re-run, since the % section used to be recomputed from raw
-    alone with no way to fall back to what was already saved.
-
-    Returns the row number of the last row written (the % NATION row).
-    """
-    N = NUM_TERRITORIES
-
-    # --- offsets within a snapshot block (0-based), matching append_snapshot ---
-    #   0            label row
-    #   1            section headers (raw)
-    #   2            col headers (raw)
-    #   3..3+N-1     territory rows (raw)
-    #   3+N          NATION row (raw)
-    #   4+N          blank
-    #   5+N          section headers (pct)
-    #   6+N          col headers (pct)
-    #   7+N..6+2N    territory rows (pct)
-    #   7+2N         NATION row (pct)
-
-    label_row = snap_rows[0] if len(snap_rows) > 0 else [None, None]
-    label_text    = label_row[0] if len(label_row) > 0 else None
-    barriers_text = label_row[1] if len(label_row) > 1 else None
-
-    def _row_val(row_vals, col):
-        j = col - 1
-        return row_vals[j] if row_vals and j < len(row_vals) else None
-
-    # Rebuild a td-like dict per territory from the stored RAW rows only.
-    snap_td = {}
-    for i, (label, *_rest) in enumerate(TERRITORIES):
-        idx = 3 + i
-        row_vals = snap_rows[idx] if idx < len(snap_rows) else None
-        if not row_vals:
-            continue
-
-        totals = {out_col: _row_val(row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
-        campus_ct = _row_val(row_vals, OUT_CAMPUS_COL)
-        snap_td[label] = {
-            "terr_num":     _row_val(row_vals, OUT_TERR_COL),
-            "vcart_name":   _row_val(row_vals, OUT_NAME_COL),
-            "campus_count": campus_ct if isinstance(campus_ct, (int, float)) else 0,
-            "region":       _row_val(row_vals, OUT_LABEL_COL) or REGION_MAP.get(label, ""),
-            "totals":       totals,
-        }
-
-    # Previously-stored PCT rows — captured so manually-entered % values can
-    # survive even when the raw side has nothing to recompute them from.
-    prior_pct_td = {}
-    for i, (label, *_rest) in enumerate(TERRITORIES):
-        idx = 7 + N + i
-        row_vals = snap_rows[idx] if idx < len(snap_rows) else None
-        if not row_vals:
-            continue
-        prior_pct_td[label] = {out_col: _row_val(row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)}
-
-    nation_idx = 7 + 2 * N
-    nation_pct_row_vals = snap_rows[nation_idx] if nation_idx < len(snap_rows) else None
-    prior_pct_nation = {out_col: _row_val(nation_pct_row_vals, out_col) for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)} \
-        if nation_pct_row_vals else {}
-
-    row = snap_start_row
-    ws.cell(row=row, column=1, value=label_text).fill = PatternFill("solid", fgColor=YELLOW)
-    ws.cell(row=row, column=1).font = Font(size=11)
-    ws.cell(row=row, column=2, value=barriers_text).font = Font(size=11)
-    row += 1
-
-    write_section_headers(ws, row); row += 1
-    write_col_headers(ws, row);    row += 1
-    for i, (label, *_rest) in enumerate(TERRITORIES):
-        write_territory_row(ws, row + i, label, snap_td.get(label), raw=True)
-    row += N
-    write_nation_row(ws, row, snap_td, raw=True); row += 2
-
-    write_section_headers(ws, row); row += 1
-    write_col_headers(ws, row);    row += 1
-    for i, (label, *_rest) in enumerate(TERRITORIES):
-        write_territory_row(ws, row + i, label, snap_td.get(label), raw=False)
-        # Fallback: any % cell that came out blank because the raw value was
-        # missing gets restored from whatever was already saved for it —
-        # preserves manual edits made directly to % cells.
-        prior = prior_pct_td.get(label, {})
-        for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1):
-            cell = ws.cell(row=row + i, column=out_col)
-            if cell.value is None and prior.get(out_col) is not None:
-                cell.value = prior.get(out_col)
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = "0%"
-    row += N
-    write_nation_row(ws, row, snap_td, raw=False)
-    for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1):
-        cell = ws.cell(row=row, column=out_col)
-        if cell.value is None and prior_pct_nation.get(out_col) is not None:
-            cell.value = prior_pct_nation.get(out_col)
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = "0%"
-
-    return row
 
 
 def _trim_snapshots(ws, keep=11):
@@ -807,94 +794,52 @@ def _trim_snapshots(ws, keep=11):
 
 
 # ---------------------------------------------------------------------------
-# EXISTING FILE READER (for preserving time series + snapshots)
+# LIVE MONTH DETECTION
 # ---------------------------------------------------------------------------
 
-def read_existing_totals(filepath):
-    existing_ts      = []
-    existing_snaps   = []
-    live_month       = None
-    live_td          = {}
+def detect_live_month(ws):
+    """Return the month name currently shown in the LIVE label (e.g. "July"
+    for a "LIVE - refreshed 7.15.26" cell), or None if there's no LIVE
+    label yet (first run) or it can't be parsed.
 
-    if not os.path.exists(filepath):
-        return existing_ts, live_month, existing_snaps, live_td
-
-    try:
-        wb = load_workbook(filepath, data_only=True)
-        if "VCART Totals" not in wb.sheetnames:
-            wb.close()
-            return existing_ts, live_month, existing_snaps, live_td
-
-        ws = wb["VCART Totals"]
-
-        # Time series
-        for r in range(TS_START_ROW, TS_END_ROW + 1):
-            val = ws.cell(row=r, column=1).value
-            if val and any(m.lower() in str(val).lower() for m in MONTH_NAMES):
-                existing_ts.append(
-                    [ws.cell(row=r, column=c).value for c in range(1, MAX_OUT_COL + 1)]
-                )
-
-        # Live month name
-        # NOTE: the LIVE label looks like "LIVE - refreshed 6.30.26" — it never
-        # contains a month name as text, so searching for a name (e.g. "June")
-        # always fails silently and live_month stays None. Instead, pull the
-        # month number out of the m.d.yy date in the label itself.
-        for r in range(1, ws.max_row + 1):
-            v = str(ws.cell(row=r, column=1).value or "")
-            if "live" in v.lower():
-                date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", v)
-                if date_match:
-                    month_num = int(date_match.group(1))
-                    if 1 <= month_num <= 12:
-                        live_month = MONTH_NAMES[month_num - 1]
-                break
-
-        # Snapshots
-        all_yellow = find_yellow_rows(ws, TS_END_ROW + 1, ws.max_row)
-        snap_yellow = [
-            rr for rr in all_yellow
-            if "live" not in str(ws.cell(row=rr, column=1).value or "").lower()
-        ]
-        for i, snap_start in enumerate(snap_yellow):
-            snap_end = snap_yellow[i + 1] - 2 if i + 1 < len(snap_yellow) else ws.max_row
-            snap_block = [
-                [ws.cell(row=sr, column=c).value for c in range(1, MAX_OUT_COL + 1)]
-                for sr in range(snap_start, snap_end + 1)
-            ]
-            existing_snaps.append(snap_block)
-
-        # Live territory data (for snapshot on month rollover)
-        for r in range(1, ws.max_row + 1):
-            v = str(ws.cell(row=r, column=1).value or "")
-            if "live" in v.lower():
-                o = get_live_offsets(ws)
-                for i, (label, *_) in enumerate(TERRITORIES):
-                    row_num = o["raw_data_row"] + i
-                    td_snap = {
-                        "terr_num":    ws.cell(row=row_num, column=OUT_TERR_COL).value,
-                        "vcart_name":  ws.cell(row=row_num, column=OUT_NAME_COL).value,
-                        "campus_count": ws.cell(row=row_num, column=OUT_CAMPUS_COL).value or 0,
-                        "region":      ws.cell(row=row_num, column=OUT_LABEL_COL).value or "",
-                        "totals": {
-                            out_col: ws.cell(row=row_num, column=out_col).value
-                            for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1)
-                        },
-                    }
-                    live_td[label] = td_snap
-                break
-
-        wb.close()
-        print(f"\n  Found {len(existing_ts)} time series rows, {len(existing_snaps)} snapshots")
-    except Exception as e:
-        print(f"  Could not read existing file: {e}")
-
-    return existing_ts, live_month, existing_snaps, live_td
+    The label never spells out a month name — it's a date like
+    "LIVE - refreshed 6.30.26" — so the month number is pulled out of the
+    m.d.yy date itself rather than text-matching a name.
+    """
+    for r in range(1, ws.max_row + 1):
+        v = str(ws.cell(row=r, column=1).value or "")
+        if "live" in v.lower():
+            date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", v)
+            if date_match:
+                month_num = int(date_match.group(1))
+                if 1 <= month_num <= 12:
+                    return MONTH_NAMES[month_num - 1]
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
 # VCART SYSTEMS — LIVE sheet (campus-level)
 # ---------------------------------------------------------------------------
+
+def _position_systems_live_sheet(wb):
+    """Ensure 'VCART Systems - LIVE' always sits directly after 'VCART Totals'
+    and before any snapshot sheets (e.g. 'VCART Systems - Jul 2026').
+
+    build_systems_live_sheet() always appends via wb.create_sheet(), which
+    puts it at the very end of the workbook. That's correct on a first run
+    (no snapshot sheets exist yet), but on later runs — where snapshot
+    sheets already sit in the workbook from prior rollovers — it would
+    otherwise land after all of them instead of between Totals and the
+    snapshots.
+    """
+    if "VCART Systems - LIVE" not in wb.sheetnames:
+        return
+    target_index = 1  # position 0 = VCART Totals
+    current_index = wb.sheetnames.index("VCART Systems - LIVE")
+    if current_index != target_index:
+        wb.move_sheet("VCART Systems - LIVE", offset=target_index - current_index)
+
 
 def build_systems_live_sheet(wb, all_td, snap_date):
     """Write campus-level data to 'VCART Systems - LIVE' sheet."""
@@ -903,7 +848,9 @@ def build_systems_live_sheet(wb, all_td, snap_date):
     ws = wb.create_sheet("VCART Systems - LIVE")
 
     # Section header row (row 1), col headers (row 2), data from row 3
-    ws.cell(row=1, column=1, value=f"VCART Systems - LIVE  (refreshed {snap_date.strftime('%m/%d/%y')})").font = Font(bold=True, size=12)
+    title_cell = ws.cell(row=1, column=1, value=f"VCART Systems - LIVE  (refreshed {snap_date.strftime('%m/%d/%y')})")
+    title_cell.font = Font(bold=True, size=12)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
 
     # Compute nation totals row for row 2
     total_campuses = sum(td["campus_count"] for td in all_td.values() if td)
@@ -923,6 +870,16 @@ def build_systems_live_sheet(wb, all_td, snap_date):
     # Section header row 3 (shifted +3 cols — Systems sheet has 8 demographic
     # cols instead of 5, so data starts later than on the VCART Totals sheet)
     write_section_headers(ws, 3, headers=SYSTEMS_SECTION_HEADERS)
+
+    # The title merge (A1:G3) must be applied AFTER write_section_headers(),
+    # not before: write_section_headers() calls unmerge_row(ws, 3) internally,
+    # which unmerges ANY merge overlapping row 3 — including this one, since
+    # it spans rows 1-3. Merging first meant it got silently destroyed here,
+    # leaving the full unwrapped title text sitting alone in cell A1, which
+    # then got miscounted as "data" by _autofit_column_widths() and blew
+    # column A out to the max width cap.
+    ws.merge_cells(start_row=1, start_column=1, end_row=3, end_column=7)
+
 
     # Column header row 4
     # Campus-level headers: cols A-H = demographics, then data cols I-AR
@@ -975,162 +932,101 @@ def build_systems_live_sheet(wb, all_td, snap_date):
                 ws_col = SRC_DATA_START + src_offset   # 1-based: matches header layout
                 cell = ws.cell(row=current_row, column=ws_col, value=val)
                 cell.font = Font(size=10)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
             ws.row_dimensions[current_row].height = 14
             current_row += 1
 
-    # Column widths
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 18
-    ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["G"].width = 6
-    ws.column_dimensions["H"].width = 7
-    from openpyxl.utils import get_column_letter
-    for i in range(9, 45):
-        ws.column_dimensions[get_column_letter(i)].width = 12
-    ws.column_dimensions["AR"].width = 20  # Last Update — needs extra room
+    _autofit_column_widths(ws)
 
     print(f"    VCART Systems - LIVE: {current_row - 5} campus rows written")
 
 
-def build_systems_snapshot_sheet(wb, all_td, snap_date, month_name):
-    """Write a frozen campus-level snapshot sheet named 'VCART Systems - {Mon YYYY}'."""
-    from openpyxl.utils import get_column_letter
-    sheet_name = f"VCART Systems - {month_name[:3]} {snap_date.strftime('%Y')}"
-    # Remove if already exists (re-run same month)
+def rename_live_sheet_as_snapshot(wb, live_month, snap_date):
+    """On month rollover, rename the existing 'VCART Systems - LIVE' sheet
+    IN PLACE to 'VCART Systems - {Mon YYYY}'.
+
+    This replaces the old copy_live_as_snapshot()/copy_existing_systems_sheets()
+    pair, which copied cells across workbooks (values + styles + column
+    widths + row heights + merges) every run. Since the script now edits
+    the existing output file directly instead of rebuilding a fresh
+    workbook each time, older snapshot sheets are already sitting in `wb`
+    untouched — no restore step needed — and freezing the current LIVE
+    sheet is a genuine rename of the same sheet object, not a
+    cell-by-cell reproduction. Nothing about it (values, styles, column
+    widths, row heights, merges, or anything else openpyxl doesn't know
+    to copy) can be lost, because nothing is actually copied.
+
+    A brand new, empty 'VCART Systems - LIVE' sheet is built separately
+    for the new month (see main()).
+    """
+    if "VCART Systems - LIVE" not in wb.sheetnames:
+        return
+
+    ws_live = wb["VCART Systems - LIVE"]
+    sheet_name = f"VCART Systems - {live_month[:3]} {snap_date.strftime('%Y')}"
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
-    ws = wb.create_sheet(sheet_name)
 
-    ws.cell(row=1, column=1,
-            value=f"VCART Systems Snapshot — {month_name} {snap_date.strftime('%Y')}  (saved {snap_date.strftime('%m/%d/%y')})").font = Font(bold=True, size=12)
-
-    # Reuse same layout as LIVE sheet
-    total_campuses = sum(td["campus_count"] for td in all_td.values() if td)
-    nation_barriers = [
-        sum(td["totals"].get(c, 0) or 0 for td in all_td.values()
-            if td and isinstance(td["totals"].get(c), (int, float)) and not isinstance(td["totals"].get(c), bool))
-        for c in BARRIER_COLS_OUT
-    ]
-    ws.cell(row=2, column=8, value="TOTALS").font = Font(bold=True, size=9)
-    ws.cell(row=2, column=8).fill = PatternFill("solid", fgColor=NATION_FILL)
-    for i, bc in enumerate(BARRIER_COLS_OUT):
-        ws.cell(row=2, column=9 + (bc - OUT_DATA_START), value=nation_barriers[i]).font = Font(size=9, bold=True)
-
-    # Shifted +3 cols — same reason as build_systems_live_sheet
-    write_section_headers(ws, 3, headers=SYSTEMS_SECTION_HEADERS)
-    for col, text in campus_hdrs.items():
-        cell = ws.cell(row=4, column=col, value=text)
-        cell.font = Font(size=9)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for out_col, text in COL_HEADERS.items():
-        if out_col >= OUT_DATA_START:
-            ws_col = SRC_DATA_START + (out_col - OUT_DATA_START)
-            cell = ws.cell(row=4, column=ws_col, value=text)
-            cell.font = Font(size=9)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.fill = _section_fill(out_col)
-    ws.row_dimensions[4].height = 80
-
-    current_row = 5
-    for label, filename in TERRITORIES:
-        td = all_td.get(label)
-        if td is None or not td["campus_rows"]:
-            continue
-        for campus in td["campus_rows"]:
-            ws.cell(row=current_row, column=1, value=campus.get("terr_num", td["terr_num"])).font = Font(size=10)
-            ws.cell(row=current_row, column=2, value=campus.get("vcart_name", td["vcart_name"])).font = Font(size=10)
-            ws.cell(row=current_row, column=3, value=campus.get("cid")).font = Font(size=10)
-            ws.cell(row=current_row, column=4, value=campus.get("corp_name")).font = Font(size=10)
-            ws.cell(row=current_row, column=5, value=campus.get("address")).font = Font(size=10)
-            ws.cell(row=current_row, column=6, value=campus.get("city")).font = Font(size=10)
-            ws.cell(row=current_row, column=7, value=campus.get("state")).font = Font(size=10)
-            ws.cell(row=current_row, column=8, value=campus.get("zip")).font = Font(size=10)
-            for out_col, val in campus.items():
-                if not isinstance(out_col, int):
-                    continue
-                ws_col = SRC_DATA_START + (out_col - OUT_DATA_START)
-                cell = ws.cell(row=current_row, column=ws_col, value=val)
-                cell.font = Font(size=10)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws.row_dimensions[current_row].height = 14
-            current_row += 1
-
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 18
-    ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["G"].width = 6
-    ws.column_dimensions["H"].width = 7
-    for i in range(9, 45):
-        ws.column_dimensions[get_column_letter(i)].width = 12
-    ws.column_dimensions["AR"].width = 20  # Last Update — needs extra room
-
-    print(f"        {sheet_name}: {current_row - 5} campus rows written")
+    # Swap the "LIVE (refreshed mm/dd/yy)" title wording for a
+    # snapshot-appropriate label, since it's now frozen, not live.
+    old_title = ws_live.cell(row=1, column=1).value or ""
+    new_title = re.sub(
+        r"VCART Systems - LIVE\s*\(refreshed [^)]*\)",
+        f"VCART Systems Snapshot — {live_month} {snap_date.strftime('%Y')}",
+        old_title,
+    )
+    ws_live.cell(row=1, column=1).value = new_title
+    ws_live.title = sheet_name
 
 
-def copy_existing_systems_sheets(src_filepath, dst_wb):
-    """Copy any existing 'VCART Systems - Mon YYYY' snapshot sheets into the new workbook.
+# ---------------------------------------------------------------------------
+# FINAL FORMATTING PASS
+# ---------------------------------------------------------------------------
 
-    Copies cell values + styles (font/fill/alignment/number_format), AND
-    the sheet-level formatting that lives outside individual cells:
-    column widths, row heights, and merged cell ranges (the section header
-    row uses merged cells). Without these, restored snapshot sheets would
-    silently lose their column sizing / row heights / merges on every run,
-    even though the per-cell styling looked fine.
+def finalize_workbook_formatting(wb):
+    """Remove gridlines on every sheet, and apply all-borders to any row
+    that has at least one non-empty cell (leaves fully blank rows untouched).
+
+    Two kinds of rows are excluded from the full-row treatment and only get
+    columns A and B bordered instead:
+      - Row 1 (the sheet title row).
+      - Any "section label" row — the yellow-filled row that sits right
+        before a new section (e.g. "LIVE - refreshed ...", "% of LIVE", or
+        a "[Month] snapshot (...)" row). These are detected dynamically via
+        is_yellow_row() rather than a hardcoded row number, since their row
+        position shifts every time a new month/snapshot is added.
     """
-    if not os.path.exists(src_filepath):
-        return
-    try:
-        wb_src = load_workbook(src_filepath, data_only=True)
-        copied = 0
-        for sname in wb_src.sheetnames:
-            if sname.startswith("VCART Systems -") and "LIVE" not in sname:
-                if sname in dst_wb.sheetnames:
-                    continue
-                ws_src = wb_src[sname]
-                ws_dst = dst_wb.create_sheet(sname)
+    AB_COLS = (1, 2)
 
-                for row in ws_src.iter_rows():
-                    for cell in row:
-                        dst_cell = ws_dst.cell(row=cell.row, column=cell.column, value=cell.value)
-                        if cell.has_style:
-                            from copy import copy as _copy
-                            dst_cell.font          = _copy(cell.font)
-                            dst_cell.fill          = _copy(cell.fill)
-                            dst_cell.alignment     = _copy(cell.alignment)
-                            dst_cell.border        = _copy(cell.border)
-                            dst_cell.number_format = cell.number_format
+    for ws in wb.worksheets:
+        ws.sheet_view.showGridLines = False
 
-                # Column widths
-                for col_letter, dim in ws_src.column_dimensions.items():
-                    if dim.width:
-                        ws_dst.column_dimensions[col_letter].width = dim.width
+        max_row = ws.max_row
+        max_col = ws.max_column
+        if max_row == 0 or max_col == 0:
+            continue
 
-                # Row heights
-                for row_idx, dim in ws_src.row_dimensions.items():
-                    if dim.height:
-                        ws_dst.row_dimensions[row_idx].height = dim.height
+        # Row 1: only column A bordered.
+        a1_val = ws.cell(row=1, column=1).value
+        if a1_val is not None and str(a1_val).strip() != "":
+            ws.cell(row=1, column=1).border = ALL_BORDERS
 
-                # Merged cell ranges (e.g. section header row)
-                for merged_range in ws_src.merged_cells.ranges:
-                    try:
-                        ws_dst.merge_cells(str(merged_range))
-                    except Exception:
-                        pass
+        for r in range(2, max_row + 1):
+            has_data = any(
+                ws.cell(row=r, column=c).value is not None and
+                str(ws.cell(row=r, column=c).value).strip() != ""
+                for c in range(1, max_col + 1)
+            )
+            if not has_data:
+                continue
 
-                copied += 1
-                print(f"        Copied sheet: {sname}")
-        wb_src.close()
-        if copied:
-            print(f"        {copied} systems snapshot sheet(s) restored.")
-    except Exception as e:
-        print(f"        WARNING: could not copy systems sheets: {e}")
+            if is_yellow_row(ws, r):
+                for c in AB_COLS:
+                    if c <= max_col:
+                        ws.cell(row=r, column=c).border = ALL_BORDERS
+                continue
+
+            for c in range(1, max_col + 1):
+                ws.cell(row=r, column=c).border = ALL_BORDERS
 
 
 def main():
@@ -1158,59 +1054,52 @@ def main():
     current_month = snap_date.strftime("%B")
 
     print(f"\nChecking for existing output file...")
-    if os.path.exists(OUTPUT):
-        print(f"  Found: {os.path.basename(OUTPUT)}")
-    else:
+    first_run = not os.path.exists(OUTPUT)
+    if first_run:
         print(f"  Not found — this is a first run.")
-
-    existing_ts, live_month, existing_snaps, live_td = read_existing_totals(OUTPUT)
+        wb = Workbook()
+        ws_totals = wb.active
+        ws_totals.title = "VCART Totals"
+        write_totals_sheet_headers(ws_totals)
+        live_month = None
+    else:
+        print(f"  Found: {os.path.basename(OUTPUT)}")
+        wb = load_workbook(OUTPUT)
+        ws_totals = wb["VCART Totals"]
+        live_month = detect_live_month(ws_totals)
 
     save_snapshot = bool(live_month and live_month != current_month)
     if save_snapshot:
         print(f"\n  Month rollover detected: {live_month} → {current_month}")
-        print(f"  Will save {live_month} as a snapshot before writing {current_month} data.")
+        print(f"  Will freeze {live_month}'s LIVE section into a snapshot before writing {current_month} data.")
     elif live_month:
         print(f"\n  Same month ({current_month}). Refreshing LIVE data only.")
     else:
         print(f"\n  First run. Writing fresh file.")
 
     print("\n" + "-" * 60)
-    print("  Building workbook...")
+    print("  Updating workbook in place...")
     print("-" * 60)
-    wb = Workbook()
 
-    # Sheet 1: VCART Totals
-    print("\n  [1/4] Writing VCART Totals sheet structure...")
-    ws_totals = wb.active
-    ws_totals.title = "VCART Totals"
-    write_totals_sheet_headers(ws_totals)
-    print("        Headers and column widths done.")
+    # --- VCART Totals sheet -------------------------------------------------
 
-    # Restore time series
-    if existing_ts:
-        print(f"\n  [2/4] Restoring {len(existing_ts)} existing time series row(s)...")
-        for i, row_data in enumerate(existing_ts):
-            ts_row = TS_START_ROW + i
-            if ts_row > TS_END_ROW:
-                break
-            row_label = str(row_data[0] or "").lower()
-            if current_month.lower() in row_label or "live" in row_label:
-                continue
-            unmerge_row(ws_totals, ts_row)
-            for c_idx, val in enumerate(row_data, 1):
-                try:
-                    cell = ws_totals.cell(row=ts_row, column=c_idx, value=val)
-                    cell.fill = PatternFill(fill_type=None)
-                    if c_idx > 2 and isinstance(val, float):
-                        cell.number_format = "0%"
-                except Exception:
-                    pass
-            print(f"        Restored: {row_data[0]}")
-    else:
-        print(f"\n  [2/4] No existing time series to restore.")
+    # Capture the LIVE section's CURRENT position before touching the time
+    # series, since adding a new month can grow the time-series block by
+    # one row (until it hits its cap) — which must shift the LIVE section
+    # and every snapshot block below it down by the same amount to keep
+    # sitting immediately below the filled time-series rows.
+    old_live_row = None if first_run else get_live_offsets(ws_totals)["live_row"]
 
-    print(f"\n  [2/4] Writing {current_month} to time series...")
+    print(f"\n  [1/3] Writing {current_month} to time series...")
     update_time_series(ws_totals, all_td, snap_date)
+
+    if not first_run:
+        new_live_row = get_live_offsets(ws_totals)["live_row"]
+        delta = new_live_row - old_live_row
+        if delta > 0:
+            print(f"        Time series grew — shifting LIVE section and snapshots down {delta} row(s).")
+            _shift_rows_down(ws_totals, old_live_row, ws_totals.max_row, delta)
+
     total_barriers = sum(
         sum(td["totals"].get(c, 0) or 0 for c in BARRIER_COLS_OUT
             if isinstance(td["totals"].get(c), (int, float)))
@@ -1218,46 +1107,31 @@ def main():
     )
     print(f"        {current_month} written — {total_barriers} total barriers, {total_campuses} campuses.")
 
-    print(f"\n  [3/4] Writing LIVE section ({NUM_TERRITORIES} territories + NATION, raw + %)...")
+    if save_snapshot:
+        print(f"\n  [2/3] Freezing {live_month}'s LIVE section into a snapshot...")
+        freeze_live_as_snapshot(ws_totals, live_month, snap_date)
+        print(f"        {live_month} snapshot written.")
+    else:
+        print(f"\n  [2/3] No rollover — LIVE section will be refreshed in place.")
+
+    print(f"\n  [2/3] Writing LIVE section ({NUM_TERRITORIES} territories + NATION, raw + %)...")
     write_live_section(ws_totals, all_td, snap_date)
     print(f"        LIVE section done.")
 
-    # Restore existing snapshots — rebuilt via the same writer functions used
-    # to create a fresh snapshot, so formatting always matches (see
-    # restore_snapshot() docstring for why).
-    if existing_snaps:
-        print(f"\n  [3/4] Restoring {len(existing_snaps)} existing snapshot(s)...")
-        next_snap_row = get_snap_start(ws_totals)
-        for idx, snap in enumerate(existing_snaps):
-            label = str(snap[0][0]) if snap and snap[0][0] else f"snapshot {idx+1}"
-            last_row = restore_snapshot(ws_totals, next_snap_row, snap)
-            next_snap_row = last_row + 2  # one blank separator row, same as append_snapshot
-            print(f"        Restored: {label}")
-    else:
-        print(f"\n  [3/4] No existing snapshots to restore.")
+    # --- VCART Systems sheets ------------------------------------------------
 
-    # Save snapshot if month rolled
-    if save_snapshot and live_td:
-        print(f"\n  [3/4] Saving {live_month} snapshot...")
-        append_snapshot(ws_totals, live_td, snap_date, live_month)
-        print(f"        {live_month} snapshot written.")
+    if save_snapshot and not first_run:
+        print(f"\n  [3/3] Renaming VCART Systems - LIVE → snapshot for {live_month}...")
+        rename_live_sheet_as_snapshot(wb, live_month, snap_date)
 
-    # Sheet 2: VCART Systems - LIVE
-    print(f"\n  [4/4] Building VCART Systems - LIVE sheet (campus-level rows)...")
+    print(f"\n  [3/3] Building VCART Systems - LIVE sheet (campus-level rows)...")
     build_systems_live_sheet(wb, all_td, snap_date)
-
-    # Restore existing systems snapshot sheets from previous output
-    print(f"\n  [4/4] Restoring existing systems snapshot sheets...")
-    copy_existing_systems_sheets(OUTPUT, wb)
-
-    # Create new systems snapshot sheet on month rollover
-    if save_snapshot and live_month:
-        print(f"\n  [4/4] Creating VCART Systems snapshot for {live_month}...")
-        build_systems_snapshot_sheet(wb, all_td, snap_date, live_month)
+    _position_systems_live_sheet(wb)
 
     print(f"\n" + "-" * 60)
     print(f"  Saving → {OUTPUT}")
     print("-" * 60)
+    finalize_workbook_formatting(wb)
     wb.save(OUTPUT)
 
     elapsed = (datetime.now() - t0).seconds
