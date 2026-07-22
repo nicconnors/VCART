@@ -521,7 +521,7 @@ def write_totals_sheet_headers(ws):
         ws.row_dimensions[r].height = 16
 
     # Column widths
-    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["A"].width = 25
     ws.column_dimensions["B"].width = 18
     ws.column_dimensions["C"].width = 16
     ws.column_dimensions["D"].width = 16
@@ -716,6 +716,7 @@ def freeze_live_as_snapshot(ws, live_month, snap_date):
     live_start = o["live_row"]
     live_end   = o["pct_nat_row"] + 1  # includes the blank spacer row after PCT NATION
     block_size = live_end - live_start + 1
+    pct_label_offset = o["pct_label_row"] - live_start  # position of "% of LIVE" within the block
 
     snap_start = get_snap_start(ws)
 
@@ -758,12 +759,30 @@ def freeze_live_as_snapshot(ws, live_month, snap_date):
                        end_row=mr.max_row + offset, end_column=mr.max_col)
 
     # Relabel the moved label row: "LIVE - refreshed ..." → "{Month} snapshot (...)"
-    date_str = snap_date.strftime("%m/%d/%y")
+    # Use the date that was ACTUALLY in the old LIVE label (still sitting in
+    # this cell right now, pre-overwrite) — not snap_date (today, when this
+    # rollover run happens), since the snapshot documents when the data was
+    # last live, not when it was frozen.
+    old_label_text = str(ws.cell(row=snap_start, column=1).value or "")
+    date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", old_label_text)
+    if date_match:
+        mm, dd, yy = date_match.groups()
+        date_str = f"{int(mm):02d}/{int(dd):02d}/{yy[-2:].zfill(2)}"
+    else:
+        date_str = snap_date.strftime("%m/%d/%y")
     ws.cell(row=snap_start, column=1, value=f"{live_month} snapshot ({date_str})")
     barriers_val = ws.cell(row=snap_start, column=2).value
     m = re.search(r"(\d+)", str(barriers_val) or "")
     if m:
         ws.cell(row=snap_start, column=2, value=f"Total barriers - {m.group(1)}")
+
+    # The moved block also carried over the "% of LIVE" label — meaningless
+    # once frozen (it's no longer live), so blank it out. Its yellow fill
+    # was copied along with everything else during the move, so it has to
+    # be cleared too, or an empty-but-still-highlighted cell is left behind.
+    pct_label_cell = ws.cell(row=snap_start + pct_label_offset, column=1)
+    pct_label_cell.value = None
+    pct_label_cell.fill = PatternFill(fill_type=None)
 
     _trim_snapshots(ws, keep=11)
 
@@ -866,6 +885,14 @@ def build_systems_live_sheet(wb, all_td, snap_date):
         out_col_offset = bc - OUT_DATA_START  # 0-based offset into barrier block
         ws.cell(row=totals_label_row, column=9 + out_col_offset,
                 value=nation_barriers[i]).font = Font(size=9, bold=True)
+
+    # "Total Barriers" — sum of the six individual barrier totals above,
+    # placed in its own cell right after the last one (column O).
+    total_barriers_col = 9 + len(BARRIER_COLS_OUT)
+    total_barriers_cell = ws.cell(row=totals_label_row, column=total_barriers_col,
+                                   value=f"Total Barriers: {sum(nation_barriers)}")
+    total_barriers_cell.font = Font(bold=True, size=9)
+    total_barriers_cell.fill = PatternFill("solid", fgColor=NATION_FILL)
 
     # Section header row 3 (shifted +3 cols — Systems sheet has 8 demographic
     # cols instead of 5, so data starts later than on the VCART Totals sheet)
