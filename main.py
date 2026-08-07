@@ -485,7 +485,7 @@ def write_nation_row(ws, row_num, all_td, raw=True):
 
 def write_totals_sheet_headers(ws):
     ws.cell(row=1, column=1, value="VCART Territory Totals").font = Font(bold=True, size=14)
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[1].height = 25
 
     # Row 3: section color bands (merged), Row 4 would overlap with data so we combine:
     # Use TS_HEADER_ROW for both section colors AND col labels — write section fills first,
