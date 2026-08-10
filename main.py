@@ -17,12 +17,16 @@ from config import (
     TERRITORIES, REGION_MAP,
     SOURCE_SHEET_KEYWORDS, HEADER_ROW, DATA_START,
     SRC_DATA_START, SRC_DATA_END, NUM_DATA_COLS,
+    BARRIER_MOVEMENT_SHEET_KEYWORD,
+    SRC_BARRIER_BOOL_START, SRC_BARRIER_BOOL_END,
+    BARRIER_TRACKING_FIELDS,
+    POST_BARRIER_SRC_START, POST_BARRIER_SRC_END, POST_BARRIER_OUT_START,
     OUT_LABEL_COL, OUT_TERRNAME_COL, OUT_TERR_COL, OUT_NAME_COL, OUT_CAMPUS_COL,
     OUT_DATA_START, MAX_OUT_COL,
     BARRIER_COLS_OUT, NATION_SUM_COLS, PCT_COLS_OUT,
     SECTION_HEADERS, TS_SECTION_HEADERS, COL_HEADERS,
     YELLOW, NATION_FILL, EAST_FILL, WEST_FILL,
-    LIVE_HDR_PEACH, LIVE_HDR_GREEN, LIVE_HDR_NAVY,
+    LIVE_HDR_PEACH, LIVE_HDR_GREEN, LIVE_HDR_PINK, LIVE_HDR_NAVY,
     MONTH_NAMES, TS_HEADER_ROW, TS_START_ROW, TS_END_ROW,
 )
 
@@ -34,16 +38,50 @@ NUM_TERRITORIES = len(TERRITORIES)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _src_to_out(src_col):
-    """Convert 1-based source column index to 1-based output column index."""
-    return OUT_DATA_START + (src_col - SRC_DATA_START)
-
-
 def _find_source_sheet(wb):
     for name in wb.sheetnames:
         nl = name.lower()
         if all(k in nl for k in SOURCE_SHEET_KEYWORDS):
             return wb[name]
+    return None
+
+
+def _find_barrier_movement_sheet(wb):
+    """Return the first sheet whose name contains BARRIER_MOVEMENT_SHEET_KEYWORD
+    (case-insensitive) — e.g. "Q3 Barrier Movement". Matched by keyword, not
+    exact name, so "Q4 Barrier Movement" etc. keeps working next quarter
+    without code changes, same pattern as the main sheet's own detection.
+    """
+    kw = BARRIER_MOVEMENT_SHEET_KEYWORD.lower()
+    for name in wb.sheetnames:
+        if kw in name.lower():
+            return wb[name]
+    return None
+
+
+def _normalize_header(text):
+    if text is None:
+        return ""
+    return re.sub(r"\s+", " ", str(text)).strip().lower()
+
+
+def _header_col_map(ws, header_row):
+    """Build {normalized_header_text: column_index} for the given header row."""
+    m = {}
+    for row in ws.iter_rows(min_row=header_row, max_row=header_row):
+        for cell in row:
+            if cell.value:
+                m[_normalize_header(cell.value)] = cell.column
+        break
+    return m
+
+
+def _resolve_field_col(header_map, candidates):
+    """Return the first column index matching any candidate header string, or None."""
+    for cand in candidates:
+        key = _normalize_header(cand)
+        if key in header_map:
+            return header_map[key]
     return None
 
 
@@ -85,6 +123,47 @@ ALL_BORDERS = Border(left=ALL_BORDER_SIDE, right=ALL_BORDER_SIDE,
 # FILE READING
 # ---------------------------------------------------------------------------
 
+def _read_row3(ws):
+    """Return row 3 as a plain list of values (positional, 0-based)."""
+    for row in ws.iter_rows(min_row=3, max_row=3, values_only=True):
+        return list(row)
+    return []
+
+
+def _campus_identity(row):
+    """CID (col C, 0-indexed 2) if it's a real int, else None. Used to
+    match a campus between the main sheet and the Barrier Movement sheet.
+    """
+    cid = row[2] if len(row) > 2 else None
+    return cid if isinstance(cid, int) else None
+
+
+def _campus_name_key(row):
+    """Normalized Corporate Parent Name (col D, 0-indexed 3), used as a
+    fallback identity when CID isn't populated at all — some territory
+    files track campuses by name instead of CID (e.g. 'DAP', 'LGBT',
+    'AltaMed'), and in those files CID is blank on every row of BOTH
+    sheets, so CID matching can never work for that territory regardless
+    of how correct the Barrier Movement sheet is.
+    """
+    name = row[3] if len(row) > 3 else None
+    if not name:
+        return None
+    return re.sub(r"\s+", " ", str(name)).strip().lower()
+
+
+def _is_real_campus_row(row):
+    has_identity = (
+        (row[0] and str(row[0]).strip()) or
+        (row[1] and str(row[1]).strip()) or
+        (row[2] and isinstance(row[2], int))
+    )
+    if not has_identity:
+        return False
+    # col I (index 8) must look like a real barrier-boolean answer
+    return len(row) > 8 and isinstance(row[8], (bool, int, float))
+
+
 def read_territory_file(filepath, terr_label):
     """
     Read one territory VCART file.
@@ -92,7 +171,7 @@ def read_territory_file(filepath, terr_label):
         terr_num    - territory number string
         vcart_name  - VCART rep name
         campus_rows - list of dicts {out_col: value} for each data campus row
-        totals_row  - dict {out_col: value} from the pre-computed TOTALS row (row 3)
+        totals_row  - dict {out_col: value} from the pre-computed TOTALS rows
     """
     try:
         wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -100,34 +179,92 @@ def read_territory_file(filepath, terr_label):
         print(f"  ERROR opening {os.path.basename(filepath)}: {e}")
         return None, None, [], {}
 
-    ws = _find_source_sheet(wb)
-    if ws is None:
+    ws_main = _find_source_sheet(wb)
+    if ws_main is None:
         print(f"  WARNING: no VRHR.VCART sheet found in {os.path.basename(filepath)}")
         wb.close()
         return None, None, [], {}
 
-    # ------------------------------------------------------------------
-    # Read TOTALS row (row 3, cols I–AR = indices 8..43)
-    # ------------------------------------------------------------------
-    totals_raw = {}
-    for row in ws.iter_rows(min_row=3, max_row=3, values_only=True):
-        for src_idx in range(SRC_DATA_START - 1, SRC_DATA_END):   # 0-based
-            v = row[src_idx] if src_idx < len(row) else None
-            out_col = OUT_DATA_START + (src_idx - (SRC_DATA_START - 1))
-            totals_raw[out_col] = v if v != "#N/A" else None
-        break
+    ws_mv = _find_barrier_movement_sheet(wb)
+    if ws_mv is None:
+        print(f"  WARNING: No '{BARRIER_MOVEMENT_SHEET_KEYWORD}' sheet found in "
+              f"{os.path.basename(filepath)} — barrier booleans and tracking "
+              f"fields (cols {OUT_DATA_START}-21) will be blank for this territory")
 
     # ------------------------------------------------------------------
-    # Read data rows (row 7 onward)
+    # Read TOTALS rows (row 3)
+    # ------------------------------------------------------------------
+    main_row3 = _read_row3(ws_main)
+    totals_raw = {}
+
+    # Post-barrier fields (CARE Team CEP Stage onward): positional, main sheet.
+    for src_idx in range(POST_BARRIER_SRC_START - 1, POST_BARRIER_SRC_END):  # 0-based
+        v = main_row3[src_idx] if src_idx < len(main_row3) else None
+        out_col = POST_BARRIER_OUT_START + (src_idx - (POST_BARRIER_SRC_START - 1))
+        totals_raw[out_col] = v if v != "#N/A" else None
+
+    if ws_mv is not None:
+        mv_row3 = _read_row3(ws_mv)
+        mv_header_map = _header_col_map(ws_mv, HEADER_ROW)
+
+        # Barrier booleans: positional, off the Barrier Movement sheet.
+        for src_idx in range(SRC_BARRIER_BOOL_START - 1, SRC_BARRIER_BOOL_END):  # 0-based
+            v = mv_row3[src_idx] if src_idx < len(mv_row3) else None
+            out_col = OUT_DATA_START + (src_idx - (SRC_BARRIER_BOOL_START - 1))
+            totals_raw[out_col] = v if v != "#N/A" else None
+
+        # Barrier Tracking fields: header-matched, off the Barrier Movement sheet.
+        for out_col, candidates in BARRIER_TRACKING_FIELDS.items():
+            src_col = _resolve_field_col(mv_header_map, candidates)
+            if src_col is None:
+                print(f"  WARNING: Could not find header for output col {out_col} "
+                      f"(tried: {candidates}) on Barrier Movement sheet in "
+                      f"{os.path.basename(filepath)} — leaving blank")
+                totals_raw[out_col] = None
+            else:
+                v = mv_row3[src_col - 1] if src_col - 1 < len(mv_row3) else None
+                totals_raw[out_col] = v if v != "#N/A" else None
+    else:
+        for out_col in range(OUT_DATA_START, POST_BARRIER_OUT_START):
+            totals_raw[out_col] = None
+
+    # ------------------------------------------------------------------
+    # Read data rows (row 7 onward) from the MAIN sheet — demographics +
+    # CEP-onward fields live here, and this remains the authoritative
+    # source of which campuses exist.
     # ------------------------------------------------------------------
     vcart_name = None
     terr_num   = None
     campus_rows = []
 
-    all_rows = list(ws.iter_rows(min_row=DATA_START, values_only=True))
-    wb.close()
+    main_rows = list(ws_main.iter_rows(min_row=DATA_START, values_only=True))
 
-    for row in all_rows:
+    # Build a CID -> row lookup for the Barrier Movement sheet, so campus
+    # rows are matched by identity rather than assumed to be in the same
+    # row order on both sheets (they happen to match in practice, but
+    # matching by CID is just as cheap and doesn't silently break if a
+    # future edit reorders one sheet but not the other).
+    mv_by_cid = {}
+    mv_by_name = {}
+    name_seen_count = Counter()
+    if ws_mv is not None:
+        for row in ws_mv.iter_rows(min_row=DATA_START, values_only=True):
+            if all(v is None or v == "" for v in row[:SRC_BARRIER_BOOL_END]):
+                continue
+            if not _is_real_campus_row(row):
+                continue
+            cid = _campus_identity(row)
+            if cid is not None:
+                mv_by_cid[cid] = row
+            name_key = _campus_name_key(row)
+            if name_key is not None:
+                name_seen_count[name_key] += 1
+                mv_by_name[name_key] = row
+
+    unmatched_count = 0
+    ambiguous_name_count = 0
+
+    for row in main_rows:
         # Stop at fully empty row
         if all(v is None or v == "" for v in row[:SRC_DATA_END]):
             continue
@@ -141,17 +278,8 @@ def read_territory_file(filepath, terr_label):
         if vcart_name is None and row[1] and str(row[1]).strip():
             vcart_name = str(row[1]).strip()
 
-        # Check if this is a real campus row:
-        # col A (territory #) or col B (name) or col C (CID) must be non-empty
-        has_identity = (
-            (row[0] and str(row[0]).strip()) or
-            (row[1] and str(row[1]).strip()) or
-            (row[2] and isinstance(row[2], int))
-        )
-        if not has_identity:
+        if not _is_real_campus_row(row):
             continue  # blank template rows — skip
-        if not isinstance(row[8], (bool, int, float)):
-            continue
 
         rd = {}
         # Store demographics: cols A-H (indices 0-7)
@@ -163,18 +291,62 @@ def read_territory_file(filepath, terr_label):
         rd["city"]       = row[5] if len(row) > 5 else None
         rd["state"]      = row[6] if len(row) > 6 else None
         rd["zip"]        = row[7] if len(row) > 7 else None
-        # Store data cols I-AR (indices 8-43)
-        for src_idx in range(SRC_DATA_START - 1, SRC_DATA_END):  # 0-based
+
+        # Post-barrier fields (CEP onward): positional, main sheet.
+        for src_idx in range(POST_BARRIER_SRC_START - 1, POST_BARRIER_SRC_END):
             v = row[src_idx] if src_idx < len(row) else None
-            out_col = OUT_DATA_START + (src_idx - (SRC_DATA_START - 1))
+            out_col = POST_BARRIER_OUT_START + (src_idx - (POST_BARRIER_SRC_START - 1))
             rd[out_col] = v if v != "#N/A" else None
+
+        # Barrier booleans + tracking: from the matching Barrier Movement
+        # campus row. Matched by CID when available; falls back to
+        # Corporate Parent Name when CID is blank on both sheets (some
+        # territory files identify campuses by name instead of CID).
+        cid = _campus_identity(row)
+        mv_row = mv_by_cid.get(cid) if (ws_mv is not None and cid is not None) else None
+        matched_by_name = False
+        if mv_row is None and ws_mv is not None:
+            name_key = _campus_name_key(row)
+            if name_key is not None:
+                if name_seen_count.get(name_key, 0) == 1:
+                    mv_row = mv_by_name.get(name_key)
+                    matched_by_name = mv_row is not None
+                elif name_seen_count.get(name_key, 0) > 1:
+                    ambiguous_name_count += 1
+        if mv_row is None:
+            if ws_mv is not None:
+                unmatched_count += 1
+            for out_col in range(OUT_DATA_START, POST_BARRIER_OUT_START):
+                rd[out_col] = None
+        else:
+            for src_idx in range(SRC_BARRIER_BOOL_START - 1, SRC_BARRIER_BOOL_END):
+                v = mv_row[src_idx] if src_idx < len(mv_row) else None
+                out_col = OUT_DATA_START + (src_idx - (SRC_BARRIER_BOOL_START - 1))
+                rd[out_col] = v if v != "#N/A" else None
+            mv_header_map = mv_header_map if ws_mv is not None else {}
+            for out_col, candidates in BARRIER_TRACKING_FIELDS.items():
+                src_col = _resolve_field_col(mv_header_map, candidates)
+                v = mv_row[src_col - 1] if (src_col and src_col - 1 < len(mv_row)) else None
+                rd[out_col] = v if v != "#N/A" else None
+
         campus_rows.append(rd)
+
+    if unmatched_count:
+        print(f"  WARNING: {unmatched_count} campus row(s) in {os.path.basename(filepath)} "
+              f"had no matching CID or Corporate Parent Name on the Barrier Movement sheet "
+              f"— barrier fields left blank for those campuses")
+    if ambiguous_name_count:
+        print(f"  WARNING: {ambiguous_name_count} campus row(s) in {os.path.basename(filepath)} "
+              f"had a Corporate Parent Name that appears more than once on the Barrier "
+              f"Movement sheet (and no CID to disambiguate) — barrier fields left blank "
+              f"rather than risk matching the wrong campus")
 
     if terr_num is None:
         terr_num = "UNKNOWN"
     if vcart_name is None:
         vcart_name = terr_label
 
+    wb.close()
     return terr_num, vcart_name, campus_rows, totals_raw
 
 
@@ -287,21 +459,8 @@ def find_yellow_rows(ws, start_row, end_row):
 
 
 def _autofit_column_widths(ws, min_width=6, max_width=32, padding=2):
-    """Set each column's width from the content actually in it, instead of
-    guessing fixed width tiers per column range — those guesses drift out
-    of sync the moment column contents change and have to be re-guessed
-    by hand every time.
-
-    Data cells drive the width primarily. Header cells (identified by
-    wrap_text=True, which every header in this workbook is built with)
-    only contribute a FLOOR based on their longest individual word, not
-    their full text — so a narrow, mostly-boolean column doesn't get
-    stretched wide just because its header is a long phrase, but also
-    doesn't shrink so far that the header wraps mid-word into unreadable
-    fragments (e.g. "Financial & Reimb. Challenges" wrapping down to
-    "Challeng" / "es"). Cells inside a merged range (title block, section
-    color band) are excluded entirely, since their text already spans
-    multiple columns and isn't tied to any single one.
+    """Set each column's width from the content actually in it. See VCART
+    Systems sheet build function for full rationale.
     """
     merged_coords = set()
     for mr in ws.merged_cells.ranges:
@@ -364,9 +523,11 @@ def write_live_col_headers(ws, row):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         if 1 <= col <= 5:
             cell.fill = PatternFill("solid", fgColor=LIVE_HDR_PEACH)
-        elif 6 <= col <= 15:
+        elif 6 <= col <= 11:
             cell.fill = PatternFill("solid", fgColor=LIVE_HDR_GREEN)
-        elif 16 <= col <= 19:
+        elif 12 <= col <= 19:
+            cell.fill = PatternFill("solid", fgColor=LIVE_HDR_PINK)
+        elif 20 <= col <= 23:
             cell.fill = PatternFill("solid", fgColor=LIVE_HDR_NAVY)
         else:
             cell.fill = _section_fill(col)
@@ -398,7 +559,9 @@ def write_territory_row(ws, row_num, label, td, raw=True):
     def _set(col, val, bold=False, fmt=None):
         cell = ws.cell(row=row_num, column=col, value=val)
         cell.font = Font(size=11, bold=bold)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+        is_number = isinstance(val, (int, float))
+        cell.alignment = Alignment(horizontal="center" if is_number else "left",
+                                    vertical="center", wrap_text=False)
         cell.fill = rfill
         if fmt:
             cell.number_format = fmt
@@ -417,22 +580,23 @@ def write_territory_row(ws, row_num, label, td, raw=True):
         cell = ws.cell(row=row_num, column=out_col)
         cell.font = Font(size=11)
         cell.fill = rfill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
         if val is None or str(val) in ("#N/A", "None"):
             cell.value = None
-            continue
+        elif not raw and out_col in BARRIER_COLS_OUT and campus_count and isinstance(val, (int, float)):
+            cell.value = val / campus_count
+            cell.number_format = "0%"
+        elif not raw and out_col in PCT_COLS_OUT and isinstance(val, (int, float)):
+            cell.value = val  # already a pct (0–1) or store as-is
+            cell.number_format = "0%"
+        else:
+            cell.value = val
 
-        if not raw:
-            if out_col in BARRIER_COLS_OUT and campus_count and isinstance(val, (int, float)):
-                cell.value = val / campus_count
-                cell.number_format = "0%"
-                continue
-            if out_col in PCT_COLS_OUT and isinstance(val, (int, float)):
-                cell.value = val  # already a pct (0–1) or store as-is
-                cell.number_format = "0%"
-                continue
-        cell.value = val
+        # Numbers center, text left — decided after the final value/type
+        # above is known, since raw vs. pct mode changes what ends up here.
+        is_number = isinstance(cell.value, (int, float))
+        cell.alignment = Alignment(horizontal="center" if is_number else "left",
+                                    vertical="center", wrap_text=False)
 
     ws.row_dimensions[row_num].height = 15
 
@@ -448,7 +612,8 @@ def write_nation_row(ws, row_num, all_td, raw=True):
         cell = ws.cell(row=row_num, column=col, value=val)
         cell.font = Font(size=11, bold=bold)
         cell.fill = nation_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        is_number = isinstance(val, (int, float))
+        cell.alignment = Alignment(horizontal="center" if is_number else "left", vertical="center")
         if fmt:
             cell.number_format = fmt
 
@@ -487,9 +652,6 @@ def write_totals_sheet_headers(ws):
     ws.cell(row=1, column=1, value="VCART Territory Totals").font = Font(bold=True, size=14)
     ws.row_dimensions[1].height = 25
 
-    # Row 3: section color bands (merged), Row 4 would overlap with data so we combine:
-    # Use TS_HEADER_ROW for both section colors AND col labels — write section fills first,
-    # then overwrite with col labels (openpyxl allows setting value on merged cell anchor)
     unmerge_row(ws, TS_HEADER_ROW)
 
     # Write section color fills across the TS header row
@@ -507,7 +669,7 @@ def write_totals_sheet_headers(ws):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.fill = fill
 
-    # Map data cols (6..41) → TS cols (3..38), write col header text with section fill
+    # Map data cols (6..MAX_OUT_COL) → TS cols (3..), write col header text with section fill
     for out_col in range(OUT_DATA_START, MAX_OUT_COL + 1):
         ts_col = out_col - OUT_DATA_START + 3
         text = COL_HEADERS.get(out_col, "")
@@ -520,19 +682,32 @@ def write_totals_sheet_headers(ws):
     for r in range(TS_START_ROW, TS_END_ROW + 1):
         ws.row_dimensions[r].height = 16
 
-    # Column widths
-    ws.column_dimensions["A"].width = 25
-    ws.column_dimensions["B"].width = 18
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 16
-    for col_letter in ["E","F","G","H"]:
-        ws.column_dimensions[col_letter].width = 10
-    for col_letter in ["I","J","K","L","M","N","O","P","Q","R","S"]:
-        ws.column_dimensions[col_letter].width = 28
-    for col_letter in ["T","U","V","W","X","Y","Z"]:
-        ws.column_dimensions[col_letter].width = 11
-    for idx in range(27, 42):
-        ws.column_dimensions[get_column_letter(idx)].width = 11
+    apply_column_widths(ws, force=True)
+
+
+def apply_column_widths(ws, force=False):
+    """Apply layout-specific column widths to the VCART Totals sheet.
+
+    force=True (first_run / brand-new file): always set every width.
+    force=False (every later run): only fill in a width for a column with
+    NO width recorded at all — preserves manual resizing in Excel across
+    runs while still backfilling any newly-added column that's missing a
+    width entirely (e.g. cols 42-44 after this restructure). See ADFR's
+    main.py for the fuller rationale (same pattern, ported here).
+    """
+    defaults = {"A": 25, "B": 18, "C": 16, "D": 16}
+    for col in ["E", "F", "G", "H"]:
+        defaults[col] = 10
+    for col in ["I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"]:
+        defaults[col] = 28
+    for col in ["T", "U", "V", "W", "X", "Y", "Z"]:
+        defaults[col] = 11
+    for idx in range(27, MAX_OUT_COL + 4):  # covers TS cols beyond old range too
+        defaults[get_column_letter(idx)] = 11
+
+    for letter, width in defaults.items():
+        if force or ws.column_dimensions[letter].width is None:
+            ws.column_dimensions[letter].width = width
 
 
 def write_live_section(ws, all_td, snap_date):
@@ -577,6 +752,19 @@ def write_live_section(ws, all_td, snap_date):
 # TIME SERIES
 # ---------------------------------------------------------------------------
 
+def _parse_ts_row_date(cell_val):
+    """Extract (year, month) from a time-series row label like
+    'January (01/15/26)'. Returns None if it can't be parsed.
+    """
+    m = re.search(r"\((\d{1,2})/(\d{1,2})/(\d{2,4})\)", str(cell_val or ""))
+    if not m:
+        return None
+    mm, _dd, yy = m.groups()
+    yy = int(yy)
+    year = 2000 + yy if yy < 100 else yy
+    return (year, int(mm))
+
+
 def update_time_series(ws, all_td, snap_date):
     month_name = snap_date.strftime("%B")
     month_row  = None
@@ -586,7 +774,12 @@ def update_time_series(ws, all_td, snap_date):
         if not cell_val or str(cell_val).strip() == "":
             month_row = r
             break
-        if month_name.lower() in str(cell_val).lower():
+        # Match on (year, month), not just month NAME — see ADFR's
+        # equivalent function for the full explanation of why a name-only
+        # match silently corrupts row order once a month name recurs in a
+        # later year.
+        parsed = _parse_ts_row_date(cell_val)
+        if parsed == (snap_date.year, snap_date.month):
             month_row = r
             break
 
@@ -594,7 +787,14 @@ def update_time_series(ws, all_td, snap_date):
         for r in range(TS_START_ROW, TS_END_ROW):
             for c in range(1, MAX_OUT_COL + 1):
                 try:
-                    ws.cell(row=r, column=c).value = ws.cell(row=r + 1, column=c).value
+                    src = ws.cell(row=r + 1, column=c)
+                    dst = ws.cell(row=r, column=c)
+                    dst.value = src.value
+                    if src.has_style:
+                        dst.font          = copy(src.font)
+                        dst.fill          = copy(src.fill)
+                        dst.alignment     = copy(src.alignment)
+                        dst.number_format = src.number_format
                 except Exception:
                     pass
         month_row = TS_END_ROW
@@ -611,8 +811,10 @@ def update_time_series(ws, all_td, snap_date):
     date_label = f"{month_name} ({snap_date.strftime('%m/%d/%y')})"
     ws.cell(row=month_row, column=1, value=date_label).font = Font(size=11)
     ws.cell(row=month_row, column=1).fill = PatternFill(fill_type=None)
+    ws.cell(row=month_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
     ws.cell(row=month_row, column=2, value=total_barriers).font = Font(size=11)
     ws.cell(row=month_row, column=2).fill = PatternFill(fill_type=None)
+    ws.cell(row=month_row, column=2).alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[month_row].height = 16
 
     # Write data into shifted TS cols (out col 6 → ts col 3, skipping identity cols 1-5)
@@ -626,6 +828,7 @@ def update_time_series(ws, all_td, snap_date):
             if nums:
                 cell.value = sum(nums)
                 cell.font = Font(size=11)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
         else:
             vals = [str(td["totals"].get(out_col) or "").strip() for td in valid
                     if td["totals"].get(out_col)]
@@ -633,7 +836,7 @@ def update_time_series(ws, all_td, snap_date):
             if vals:
                 cell.value = Counter(vals).most_common(1)[0][0]
                 cell.font = Font(size=11)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.alignment = Alignment(horizontal="left", vertical="center")
 
 
 # ---------------------------------------------------------------------------
@@ -641,26 +844,9 @@ def update_time_series(ws, all_td, snap_date):
 # ---------------------------------------------------------------------------
 
 def _shift_rows_down(ws, start_row, end_row, delta):
-    """Physically move every row in [start_row, end_row] down by `delta`
-    rows — values, styles, row heights, and merged ranges — clearing the
-    vacated original rows. No-op if delta <= 0 or the range is empty.
-
-    Used for two purposes:
-      1. Making room right after the time-series block grows by one row
-         (shifts the LIVE section and every snapshot block below it down
-         by 1 to stay immediately below the filled time-series rows).
-      2. Making room for a newly-frozen snapshot block (shifts all
-         previously-frozen snapshot blocks down by one block's worth of
-         rows).
-    Processes rows from end_row down to start_row so overlapping
-    source/destination ranges (delta smaller than the range itself) never
-    read a row that's already been overwritten.
-    """
     if delta <= 0 or end_row < start_row:
         return
 
-    # Move merged ranges within the region first (openpyxl won't let you
-    # write into cells that are still merged from a stale position).
     merges = [mr for mr in list(ws.merged_cells.ranges)
               if mr.min_row >= start_row and mr.max_row <= end_row]
     for mr in merges:
@@ -695,38 +881,16 @@ def _shift_rows_down(ws, start_row, end_row, delta):
 # ---------------------------------------------------------------------------
 
 def freeze_live_as_snapshot(ws, live_month, snap_date):
-    """
-    On month rollover, take the CURRENT LIVE section — the actual rows
-    already sitting in the sheet — and move them down to become the newest
-    frozen snapshot block, then relabel the moved label row.
-
-    This replaces the old append_snapshot()/restore_snapshot() pair, which
-    recomputed every snapshot from captured raw values every single run
-    (rebuilding the whole workbook from scratch each time). Since the
-    script now edits the existing file in place, the outgoing month's data
-    is already sitting in the LIVE section with correct formatting — moving
-    those exact rows is a real cut/paste, not a recompute, so nothing can
-    drift from what LIVE actually showed at the moment of rollover.
-
-    Must be called with `ws` already reflecting any time-series-growth
-    shift (see main()), and BEFORE write_live_section() writes the new
-    month's data into the (now vacated) LIVE position.
-    """
     o = get_live_offsets(ws)
     live_start = o["live_row"]
-    live_end   = o["pct_nat_row"] + 1  # includes the blank spacer row after PCT NATION
+    live_end   = o["pct_nat_row"] + 1
     block_size = live_end - live_start + 1
-    pct_label_offset = o["pct_label_row"] - live_start  # position of "% of LIVE" within the block
+    pct_label_offset = o["pct_label_row"] - live_start
 
     snap_start = get_snap_start(ws)
 
-    # Make room: shift every already-frozen snapshot block down by block_size.
     _shift_rows_down(ws, snap_start, ws.max_row, block_size)
 
-    # Move the LIVE block itself down into the vacated snapshot slot. Source
-    # and destination ranges are disjoint (there's always a blank-row gap
-    # between the LIVE section and the first snapshot), so a plain
-    # copy-then-clear is safe regardless of order.
     live_merges = [mr for mr in list(ws.merged_cells.ranges)
                    if live_start <= mr.min_row <= live_end]
     for mr in live_merges:
@@ -758,11 +922,6 @@ def freeze_live_as_snapshot(ws, live_month, snap_date):
         ws.merge_cells(start_row=mr.min_row + offset, start_column=mr.min_col,
                        end_row=mr.max_row + offset, end_column=mr.max_col)
 
-    # Relabel the moved label row: "LIVE - refreshed ..." → "{Month} snapshot (...)"
-    # Use the date that was ACTUALLY in the old LIVE label (still sitting in
-    # this cell right now, pre-overwrite) — not snap_date (today, when this
-    # rollover run happens), since the snapshot documents when the data was
-    # last live, not when it was frozen.
     old_label_text = str(ws.cell(row=snap_start, column=1).value or "")
     date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", old_label_text)
     if date_match:
@@ -776,10 +935,6 @@ def freeze_live_as_snapshot(ws, live_month, snap_date):
     if m:
         ws.cell(row=snap_start, column=2, value=f"Total barriers - {m.group(1)}")
 
-    # The moved block also carried over the "% of LIVE" label — meaningless
-    # once frozen (it's no longer live), so blank it out. Its yellow fill
-    # was copied along with everything else during the move, so it has to
-    # be cleared too, or an empty-but-still-highlighted cell is left behind.
     pct_label_cell = ws.cell(row=snap_start + pct_label_offset, column=1)
     pct_label_cell.value = None
     pct_label_cell.fill = PatternFill(fill_type=None)
@@ -817,22 +972,23 @@ def _trim_snapshots(ws, keep=11):
 # ---------------------------------------------------------------------------
 
 def detect_live_month(ws):
-    """Return the month name currently shown in the LIVE label (e.g. "July"
-    for a "LIVE - refreshed 7.15.26" cell), or None if there's no LIVE
-    label yet (first run) or it can't be parsed.
-
-    The label never spells out a month name — it's a date like
-    "LIVE - refreshed 6.30.26" — so the month number is pulled out of the
-    m.d.yy date itself rather than text-matching a name.
+    """Return (month_name, year, month_num) for the LIVE label's date, or
+    None. Year-aware for the same reason as ADFR's version — a name-only
+    comparison would misread a gap of exactly 12+ months landing on the
+    same calendar month as "same month, refresh in place", silently
+    skipping the snapshot freeze.
     """
     for r in range(1, ws.max_row + 1):
         v = str(ws.cell(row=r, column=1).value or "")
         if "live" in v.lower():
             date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", v)
             if date_match:
-                month_num = int(date_match.group(1))
+                mm, _dd, yy = date_match.groups()
+                month_num = int(mm)
                 if 1 <= month_num <= 12:
-                    return MONTH_NAMES[month_num - 1]
+                    yy = int(yy)
+                    year = 2000 + yy if yy < 100 else yy
+                    return (MONTH_NAMES[month_num - 1], year, month_num)
             return None
     return None
 
@@ -842,19 +998,9 @@ def detect_live_month(ws):
 # ---------------------------------------------------------------------------
 
 def _position_systems_live_sheet(wb):
-    """Ensure 'VCART Systems - LIVE' always sits directly after 'VCART Totals'
-    and before any snapshot sheets (e.g. 'VCART Systems - Jul 2026').
-
-    build_systems_live_sheet() always appends via wb.create_sheet(), which
-    puts it at the very end of the workbook. That's correct on a first run
-    (no snapshot sheets exist yet), but on later runs — where snapshot
-    sheets already sit in the workbook from prior rollovers — it would
-    otherwise land after all of them instead of between Totals and the
-    snapshots.
-    """
     if "VCART Systems - LIVE" not in wb.sheetnames:
         return
-    target_index = 1  # position 0 = VCART Totals
+    target_index = 1
     current_index = wb.sheetnames.index("VCART Systems - LIVE")
     if current_index != target_index:
         wb.move_sheet("VCART Systems - LIVE", offset=target_index - current_index)
@@ -866,12 +1012,10 @@ def build_systems_live_sheet(wb, all_td, snap_date):
         del wb["VCART Systems - LIVE"]
     ws = wb.create_sheet("VCART Systems - LIVE")
 
-    # Section header row (row 1), col headers (row 2), data from row 3
     title_cell = ws.cell(row=1, column=1, value=f"VCART Systems - LIVE  (refreshed {snap_date.strftime('%m/%d/%y')})")
     title_cell.font = Font(bold=True, size=12)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Compute nation totals row for row 2
     total_campuses = sum(td["campus_count"] for td in all_td.values() if td)
     nation_barriers = [
         sum(td["totals"].get(c, 0) or 0 for td in all_td.values()
@@ -882,34 +1026,20 @@ def build_systems_live_sheet(wb, all_td, snap_date):
     ws.cell(row=totals_label_row, column=8, value="TOTALS").font = Font(bold=True, size=9)
     ws.cell(row=totals_label_row, column=8).fill = PatternFill("solid", fgColor=NATION_FILL)
     for i, bc in enumerate(BARRIER_COLS_OUT):
-        out_col_offset = bc - OUT_DATA_START  # 0-based offset into barrier block
+        out_col_offset = bc - OUT_DATA_START
         ws.cell(row=totals_label_row, column=9 + out_col_offset,
                 value=nation_barriers[i]).font = Font(size=9, bold=True)
 
-    # "Total Barriers" — sum of the six individual barrier totals above,
-    # placed in its own cell right after the last one (column O).
     total_barriers_col = 9 + len(BARRIER_COLS_OUT)
     total_barriers_cell = ws.cell(row=totals_label_row, column=total_barriers_col,
                                    value=f"Total Barriers: {sum(nation_barriers)}")
     total_barriers_cell.font = Font(bold=True, size=9)
     total_barriers_cell.fill = PatternFill("solid", fgColor=NATION_FILL)
 
-    # Section header row 3 (shifted +3 cols — Systems sheet has 8 demographic
-    # cols instead of 5, so data starts later than on the VCART Totals sheet)
     write_section_headers(ws, 3, headers=SYSTEMS_SECTION_HEADERS)
 
-    # The title merge (A1:G3) must be applied AFTER write_section_headers(),
-    # not before: write_section_headers() calls unmerge_row(ws, 3) internally,
-    # which unmerges ANY merge overlapping row 3 — including this one, since
-    # it spans rows 1-3. Merging first meant it got silently destroyed here,
-    # leaving the full unwrapped title text sitting alone in cell A1, which
-    # then got miscounted as "data" by _autofit_column_widths() and blew
-    # column A out to the max width cap.
     ws.merge_cells(start_row=1, start_column=1, end_row=3, end_column=7)
 
-
-    # Column header row 4
-    # Campus-level headers: cols A-H = demographics, then data cols I-AR
     campus_hdrs = {
         1: "VCART Territory #",
         2: "VCART Name",
@@ -920,45 +1050,51 @@ def build_systems_live_sheet(wb, all_td, snap_date):
         7: "State",
         8: "Zip",
     }
-    # Shift section headers and data headers by 4 (demographics take cols 1-8,
-    # data cols 9..44 = source col indices mapped directly)
     for col, text in campus_hdrs.items():
         cell = ws.cell(row=4, column=col, value=text)
         cell.font = Font(size=9, bold=False)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for out_col, text in COL_HEADERS.items():
         if out_col >= OUT_DATA_START:
-            src_col = SRC_DATA_START + (out_col - OUT_DATA_START)  # 1-based source col
-            ws_col  = src_col  # campus sheet: cols 1-8 are demog, cols 9-44 are data
+            src_col = SRC_DATA_START + (out_col - OUT_DATA_START)
+            ws_col  = src_col
             cell = ws.cell(row=4, column=ws_col, value=text)
             cell.font = Font(size=9)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.fill = _section_fill(out_col)
     ws.row_dimensions[4].height = 80
 
-    # Data rows
     current_row = 5
     for label, filename in TERRITORIES:
         td = all_td.get(label)
         if td is None or not td["campus_rows"]:
             continue
         for campus in td["campus_rows"]:
-            ws.cell(row=current_row, column=1, value=campus.get("terr_num", td["terr_num"])).font = Font(size=10)
-            ws.cell(row=current_row, column=2, value=campus.get("vcart_name", td["vcart_name"])).font = Font(size=10)
-            ws.cell(row=current_row, column=3, value=campus.get("cid")).font = Font(size=10)
-            ws.cell(row=current_row, column=4, value=campus.get("corp_name")).font = Font(size=10)
-            ws.cell(row=current_row, column=5, value=campus.get("address")).font = Font(size=10)
-            ws.cell(row=current_row, column=6, value=campus.get("city")).font = Font(size=10)
-            ws.cell(row=current_row, column=7, value=campus.get("state")).font = Font(size=10)
-            ws.cell(row=current_row, column=8, value=campus.get("zip")).font = Font(size=10)
+            def _demog(col, val):
+                cell = ws.cell(row=current_row, column=col, value=val)
+                cell.font = Font(size=10)
+                is_number = isinstance(val, (int, float))
+                cell.alignment = Alignment(horizontal="center" if is_number else "left",
+                                            vertical="center")
+            _demog(1, campus.get("terr_num", td["terr_num"]))
+            _demog(2, campus.get("vcart_name", td["vcart_name"]))
+            _demog(3, campus.get("cid"))
+            _demog(4, campus.get("corp_name"))
+            _demog(5, campus.get("address"))
+            _demog(6, campus.get("city"))
+            _demog(7, campus.get("state"))
+            _demog(8, campus.get("zip"))
 
             for out_col, val in campus.items():
                 if not isinstance(out_col, int):
-                    continue  # skip demographic keys
-                src_offset = out_col - OUT_DATA_START  # 0-based
-                ws_col = SRC_DATA_START + src_offset   # 1-based: matches header layout
+                    continue
+                src_offset = out_col - OUT_DATA_START
+                ws_col = SRC_DATA_START + src_offset
                 cell = ws.cell(row=current_row, column=ws_col, value=val)
                 cell.font = Font(size=10)
+                is_number = isinstance(val, (int, float))
+                cell.alignment = Alignment(horizontal="center" if is_number else "left",
+                                            vertical="center")
             ws.row_dimensions[current_row].height = 14
             current_row += 1
 
@@ -968,23 +1104,6 @@ def build_systems_live_sheet(wb, all_td, snap_date):
 
 
 def rename_live_sheet_as_snapshot(wb, live_month, snap_date):
-    """On month rollover, rename the existing 'VCART Systems - LIVE' sheet
-    IN PLACE to 'VCART Systems - {Mon YYYY}'.
-
-    This replaces the old copy_live_as_snapshot()/copy_existing_systems_sheets()
-    pair, which copied cells across workbooks (values + styles + column
-    widths + row heights + merges) every run. Since the script now edits
-    the existing output file directly instead of rebuilding a fresh
-    workbook each time, older snapshot sheets are already sitting in `wb`
-    untouched — no restore step needed — and freezing the current LIVE
-    sheet is a genuine rename of the same sheet object, not a
-    cell-by-cell reproduction. Nothing about it (values, styles, column
-    widths, row heights, merges, or anything else openpyxl doesn't know
-    to copy) can be lost, because nothing is actually copied.
-
-    A brand new, empty 'VCART Systems - LIVE' sheet is built separately
-    for the new month (see main()).
-    """
     if "VCART Systems - LIVE" not in wb.sheetnames:
         return
 
@@ -993,8 +1112,6 @@ def rename_live_sheet_as_snapshot(wb, live_month, snap_date):
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
 
-    # Swap the "LIVE (refreshed mm/dd/yy)" title wording for a
-    # snapshot-appropriate label, since it's now frozen, not live.
     old_title = ws_live.cell(row=1, column=1).value or ""
     new_title = re.sub(
         r"VCART Systems - LIVE\s*\(refreshed [^)]*\)",
@@ -1010,18 +1127,6 @@ def rename_live_sheet_as_snapshot(wb, live_month, snap_date):
 # ---------------------------------------------------------------------------
 
 def finalize_workbook_formatting(wb):
-    """Remove gridlines on every sheet, and apply all-borders to any row
-    that has at least one non-empty cell (leaves fully blank rows untouched).
-
-    Two kinds of rows are excluded from the full-row treatment and only get
-    columns A and B bordered instead:
-      - Row 1 (the sheet title row).
-      - Any "section label" row — the yellow-filled row that sits right
-        before a new section (e.g. "LIVE - refreshed ...", "% of LIVE", or
-        a "[Month] snapshot (...)" row). These are detected dynamically via
-        is_yellow_row() rather than a hardcoded row number, since their row
-        position shifts every time a new month/snapshot is added.
-    """
     AB_COLS = (1, 2)
 
     for ws in wb.worksheets:
@@ -1032,7 +1137,6 @@ def finalize_workbook_formatting(wb):
         if max_row == 0 or max_col == 0:
             continue
 
-        # Row 1: only column A bordered.
         a1_val = ws.cell(row=1, column=1).value
         if a1_val is not None and str(a1_val).strip() != "":
             ws.cell(row=1, column=1).border = ALL_BORDERS
@@ -1088,14 +1192,15 @@ def main():
         ws_totals = wb.active
         ws_totals.title = "VCART Totals"
         write_totals_sheet_headers(ws_totals)
-        live_month = None
+        live_info = None
     else:
         print(f"  Found: {os.path.basename(OUTPUT)}")
         wb = load_workbook(OUTPUT)
         ws_totals = wb["VCART Totals"]
-        live_month = detect_live_month(ws_totals)
+        live_info = detect_live_month(ws_totals)
 
-    save_snapshot = bool(live_month and live_month != current_month)
+    live_month = live_info[0] if live_info else None
+    save_snapshot = bool(live_info and (live_info[1], live_info[2]) != (snap_date.year, snap_date.month))
     if save_snapshot:
         print(f"\n  Month rollover detected: {live_month} → {current_month}")
         print(f"  Will freeze {live_month}'s LIVE section into a snapshot before writing {current_month} data.")
@@ -1108,13 +1213,6 @@ def main():
     print("  Updating workbook in place...")
     print("-" * 60)
 
-    # --- VCART Totals sheet -------------------------------------------------
-
-    # Capture the LIVE section's CURRENT position before touching the time
-    # series, since adding a new month can grow the time-series block by
-    # one row (until it hits its cap) — which must shift the LIVE section
-    # and every snapshot block below it down by the same amount to keep
-    # sitting immediately below the filled time-series rows.
     old_live_row = None if first_run else get_live_offsets(ws_totals)["live_row"]
 
     print(f"\n  [1/3] Writing {current_month} to time series...")
@@ -1145,8 +1243,6 @@ def main():
     write_live_section(ws_totals, all_td, snap_date)
     print(f"        LIVE section done.")
 
-    # --- VCART Systems sheets ------------------------------------------------
-
     if save_snapshot and not first_run:
         print(f"\n  [3/3] Renaming VCART Systems - LIVE → snapshot for {live_month}...")
         rename_live_sheet_as_snapshot(wb, live_month, snap_date)
@@ -1158,6 +1254,7 @@ def main():
     print(f"\n" + "-" * 60)
     print(f"  Saving → {OUTPUT}")
     print("-" * 60)
+    apply_column_widths(ws_totals)
     finalize_workbook_formatting(wb)
     wb.save(OUTPUT)
 

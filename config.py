@@ -6,6 +6,38 @@ for the VCART Aggregator. Update this file when:
   - Territories change or new files are added
   - Column layouts shift in the source VRHR.VCART sheets
   - Section headers or output column structure changes
+
+CHANGE LOG (this revision):
+  - As of Q3 2026, barrier-related data (booleans + tracking) moved off the
+    main "VRHR.VCART" sheet onto a separate "<Qn> Barrier Movement" sheet,
+    with a restructured layout: a Subcategory column was inserted after
+    each barrier category, and the old "Q1-Q4 Prioritized Barrier" +
+    "Prioritized Implementation Barrier" fields were replaced by two
+    barriers (Category/Subcategory/Start/Close each) + implementation
+    stage fields. Same restructuring ADFR went through — see that
+    project's config.py CHANGE LOG for the full story.
+  - The main "VRHR.VCART" sheet's own barrier data is now STALE — the
+    Barrier Movement sheet is the current/authoritative copy. So barrier
+    booleans (Access for All -> Tech & Data Limitations), which used to be
+    read from the main sheet, are now read from the Barrier Movement sheet
+    too, for BOTH the territory-level totals row and every individual
+    campus row in the "VCART Systems - LIVE" sheet.
+  - Barrier Tracking fields (cols 12-21) are read from the Barrier
+    Movement sheet by HEADER TEXT, not fixed position, since that sheet's
+    layout has already shifted once. Everything from "CARE Team CEP
+    Stage" onward is unaffected and still read positionally from the main
+    sheet.
+  - Net effect: the barrier block grew from 13 output columns (6-18) to
+    16 (6-21), so everything after it shifted from cols 19-41 to 22-44.
+    MAX_OUT_COL is now 44 (was 41).
+  - Fixed in passing (unavoidable side effect of the column shift, not
+    extra scope): PCT_COLS_OUT previously pointed at col 41 ("Last
+    Update") instead of the real "% campuses flagged for TFRM" field —
+    after the shift, col 41 correctly IS that field. TS_SECTION_HEADERS
+    is now DERIVED from SECTION_HEADERS instead of hand-typed as a
+    separate parallel list, which is what caused the original off-by-one
+    in the first place — deriving it removes that whole bug class going
+    forward, not just today's instance.
 """
 
 import os
@@ -51,9 +83,6 @@ if not os.path.isdir(BASE_DIR):
 
 # =============================================================================
 # SOURCE FILES
-# One entry per territory: (display_label, filename, territory_number_override)
-# territory_number_override: use None to read col A from file; set a string to
-# hard-code (for files missing col A like MidAtlantic, MidSouth).
 # =============================================================================
 
 TERRITORIES = [
@@ -80,22 +109,47 @@ TERRITORIES = [
 # SOURCE SHEET & LAYOUT
 # =============================================================================
 
-SOURCE_SHEET_KEYWORDS = ("vrhr", "vcart")   # sheet name must contain both (case-insensitive)
+SOURCE_SHEET_KEYWORDS = ("vrhr", "vcart")   # main sheet name must contain both (case-insensitive)
 HEADER_ROW  = 6   # 1-based row with column headers in source files
 DATA_START  = 7   # first data row in source files
 
-# Source columns (1-based) that contain the 36 output data values
-# Cols A-H (1-8): demographics (terr #, name, CID, corp name, addr, city, state, zip)
-# Col I-N  (9-14): 6 barrier booleans
-# Col O-R  (15-18): Q1-Q4 prioritized barrier text
-# Col S-AP (19-44): remaining data fields
-# We read cols 9-44 as data (36 cols) → output cols 7-42 in aggregator
-# Col 1=Region/label, col 2=Territory#, col 3=VCART Name, col 4=Total Campuses,
-# then cols 5-40 = source cols 9-44
+# NEW as of Q3 2026: barrier boolean + tracking data now lives on a
+# separate sheet (e.g. "Q3 Barrier Movement"). Matched by keyword, not an
+# exact name, so this keeps working automatically as the quarter changes.
+BARRIER_MOVEMENT_SHEET_KEYWORD = "barrier movement"
 
-NUM_DATA_COLS = 36   # source cols I through AP (indices 8..43)
-SRC_DATA_START = 9  # 1-based source column where data begins (col I)
-SRC_DATA_END   = 44 # 1-based source column where data ends (col AR)  inclusive
+# Barrier booleans (6 cols): still read positionally, just from the
+# Barrier Movement sheet instead of the main sheet now.
+SRC_BARRIER_BOOL_START = 9   # col I
+SRC_BARRIER_BOOL_END   = 14  # col N
+
+# Barrier Tracking fields: read from the Barrier Movement sheet by HEADER
+# TEXT (row 6), not position — that sheet's layout already shifted once
+# (a Subcategory column inserted, "Prioritized Barrier 3" dropped), so a
+# fixed position would silently break the next time it shifts again.
+# {output_col: [candidate header strings, tried in order]}
+BARRIER_TRACKING_FIELDS = {
+    12: ["Prioritized Barrier 1 Category", "Prioritized Barrier 1"],
+    13: ["Prioritized Barrier 1 Subcategory"],
+    14: ["Barrier 1 Start Date"],
+    15: ["Barrier 1 Close Date"],
+    16: ["Prioritized Barrier 2 Category", "Prioritized Barrier 2"],
+    17: ["Prioritized Barrier 2 Subcategory"],
+    18: ["Barrier 2 Start Date"],
+    19: ["Barrier 2 Close Date"],
+    20: ["Start of Quarter Implementation Stage (ENTER AT START of QUARTER AND DO NOT CHANGE)",
+         "Start of Quarter Implementation Stage"],
+    21: ["Current Implementation Stage"],
+}
+
+# Everything from "CARE Team CEP Stage" onward is unaffected by the
+# restructure and still read positionally from the MAIN sheet.
+# POST_BARRIER_SRC_START = the main sheet's own source column for "CARE
+# Team CEP Stage" (unchanged — that sheet's layout didn't move).
+# POST_BARRIER_OUT_START = the output column it now lands at.
+POST_BARRIER_SRC_START = 22
+POST_BARRIER_SRC_END   = 44   # main sheet's "Last Update" column
+POST_BARRIER_OUT_START = 22
 
 # =============================================================================
 # OUTPUT COLUMN LAYOUT
@@ -105,16 +159,27 @@ SRC_DATA_END   = 44 # 1-based source column where data ends (col AR)  inclusive
 #   3 = Territory #
 #   4 = VCART Name
 #   5 = Total Accounts
-#   6..41 = data cols (maps from source cols 9..44)
+#   6-11  = Implementation Barriers (Barrier Movement sheet, positional)
+#   12-21 = Barrier Tracking (Barrier Movement sheet, header-text lookup)
+#   22-44 = CEP onward (main sheet, positional)
 # =============================================================================
 
-OUT_LABEL_COL   = 1
+OUT_LABEL_COL    = 1
 OUT_TERRNAME_COL = 2
-OUT_TERR_COL    = 3
-OUT_NAME_COL    = 4
-OUT_CAMPUS_COL  = 5
-OUT_DATA_START  = 6   # output col for first data field (Access for All)
-MAX_OUT_COL     = OUT_DATA_START + NUM_DATA_COLS - 1  # = 41
+OUT_TERR_COL     = 3
+OUT_NAME_COL     = 4
+OUT_CAMPUS_COL   = 5
+OUT_DATA_START   = 6   # output col for first data field (Access for All)
+MAX_OUT_COL      = POST_BARRIER_OUT_START + (POST_BARRIER_SRC_END - POST_BARRIER_SRC_START)  # 44
+
+# Kept for backward compatibility with anything reading NUM_DATA_COLS /
+# SRC_DATA_START / SRC_DATA_END as "the whole data block" — SRC_DATA_START
+# is still the first source column read on the MAIN sheet for demographic
+# purposes and general layout math (e.g. the Systems sheet's column
+# offset), which hasn't changed.
+SRC_DATA_START = 9
+SRC_DATA_END   = POST_BARRIER_SRC_END  # 44
+NUM_DATA_COLS  = MAX_OUT_COL - OUT_DATA_START + 1  # 39
 
 # Columns (output, 1-based) that hold numeric barrier counts → sum for NATION
 BARRIER_COLS_OUT = list(range(6, 12))   # Access for All … Tech & Data Limitations (6 cols)
@@ -122,13 +187,12 @@ BARRIER_COLS_OUT = list(range(6, 12))   # Access for All … Tech & Data Limitat
 # Columns (output) that hold numeric values to nation-sum (all numeric data fields)
 NATION_SUM_COLS = BARRIER_COLS_OUT      # extend if more numeric cols need summing
 
-# Percent cols — numeric fields expressed as % of campuses (e.g. %flagged for TFRM)
-# Output col 41 = "What % of campuses flagged for TFRM support" (src col 44 → out col 41)
+# Percent cols — numeric fields expressed as % of campuses.
+# Output col 41 = "% campuses flagged for TFRM support" (main sheet src 41).
 PCT_COLS_OUT = [41]
 
 # =============================================================================
 # REGION GROUPINGS
-# Maps territory labels to their region display name
 # =============================================================================
 
 REGION_MAP = {
@@ -155,30 +219,38 @@ REGION_MAP = {
 # =============================================================================
 
 SECTION_HEADERS = [
-    (6,  11, "Implementation Barriers",      "92D050"),   # green
-    (12, 15, "Q Prioritized Barriers",        "92D050"),   # green (extends through Q4)
-    (16, 19, "Customer Engagement Phase",     "2E5F8A"),   # light navy blue
-    (20, 24, "Discovery",                     "B3D9FF"),
-    (25, 31, "Mapping the Pathway",           "92D050"),
-    (32, 36, "Tech Embedment",                "B3D9FF"),
-    (37, 41, "Sustainment and Accountability","B3D9FF"),
+    (6,  11, "Implementation Barriers",       "92D050"),   # green
+    (12, 19, "Barrier Tracking",              "FFB3C6"),   # pink — Barrier1/2 Category/Subcategory/Start/Close only
+    (20, 23, "Customer Engagement Phase",     "2E5F8A"),   # navy — Start/Current Impl Stage, CARE Team CEP Stage, Evolved
+    (24, 28, "Discovery",                     "B3D9FF"),   # ends at 340b Eligibility Campuses
+    (29, 35, "Mapping the Pathway",           "92D050"),   # starts at Pathway Mapped
+    (36, 40, "Tech Embedment",                "B3D9FF"),   # starts at ViiV Connect User Level
+    (41, 44, "Sustainment and Accountability","B3D9FF"),   # starts at % Campuses Flagged TFRM
 ]
 
-# Time series section headers — only barrier cols, no identity cols
+# Time series section headers — DERIVED from SECTION_HEADERS, not hand-typed.
+# The TS row skips the 5 identity cols (Region/TerrName/Terr#/Name/Campuses)
+# that the main Totals sheet has, so its columns run 3 narrower than the
+# output layout: ts_col = out_col - OUT_DATA_START + 3 = out_col - 3.
+# Hand-typing this as a second parallel list (the old approach) is exactly
+# what let it drift out of sync and go off-by-one in the first place.
+_TS_COL_OFFSET = OUT_DATA_START - 3  # = 3
 TS_SECTION_HEADERS = [
-    (3,  8,  "Implementation Barriers",      "92D050"),
-    (9,  12, "Q Prioritized Barriers",        "92D050"),
-    (13, 15, "Customer Engagement Phase",     "2E5F8A"),
-    (16, 20, "Discovery",                     "B3D9FF"),
-    (21, 27, "Mapping the Pathway",           "92D050"),
-    (28, 32, "Tech Embedment",                "B3D9FF"),
-    (33, 37, "Sustainment and Accountability","B3D9FF"),
+    (start - _TS_COL_OFFSET, end - _TS_COL_OFFSET, label, color)
+    for start, end, label, color in SECTION_HEADERS
 ]
 
-# LIVE section header colors (cols 1-5 peach, 6-15 green, 16-19 navy, rest normal)
+# LIVE section header colors (cols 1-5 peach, 6-11 green [Implementation
+# Barriers], 12-19 pink [Barrier Tracking], 20-23 navy [CEP], rest normal
+# via _section_fill). These must be kept in sync with SECTION_HEADERS —
+# previously this used one hardcoded green zone spanning both
+# Implementation Barriers AND Barrier Tracking, which is what caused the
+# column-header row (row 13 in the LIVE section) to show green under
+# "Barrier Tracking" instead of matching that section's actual pink.
 LIVE_HDR_PEACH  = "FFE4C4"   # cols 1-5: Region, Terr Name, Terr#, VCART Name, Total Accounts
-LIVE_HDR_GREEN  = "92D050"   # cols 6-15: Access for All → Q4 Prioritized Barrier
-LIVE_HDR_NAVY   = "2E5F8A"   # cols 16-19: Customer Engagement Phase cols
+LIVE_HDR_GREEN  = "92D050"   # cols 6-11: Implementation Barriers
+LIVE_HDR_PINK   = "FFB3C6"   # cols 12-19: Barrier Tracking
+LIVE_HDR_NAVY   = "2E5F8A"   # cols 20-23: Customer Engagement Phase
 
 # =============================================================================
 # COLUMN HEADERS  (output col → header text)
@@ -196,36 +268,39 @@ COL_HEADERS = {
     9:  "Operational &\nInfrastructure\nGaps",
     10: "Stakeholder\nMisalignment",
     11: "Technology &\nData\nLimitations",
-    12: "Q1 Prioritized\nBarrier",
-    13: "Q2 Prioritized\nBarrier",
-    14: "Q3 Prioritized\nBarrier",
-    15: "Q4 Prioritized\nBarrier",
-    16: "Prioritized\nImpl. Barrier",
-    17: "Current\nImpl. Stage",
-    18: "Start of Qtr\nImpl. Stage",
-    19: "CARE Team\nCEP Stage",
-    20: "Evolved\n(DO NOT\nUPDATE)",
-    21: "Centralized\nor\nDecentralized",
-    22: "C/D Suite\nAccess",
-    23: "Current\nEHR",
-    24: "ViiV 340b\nContract",
-    25: "340b\nEligibility\nCampuses",
-    26: "Pathway\nMapped",
-    27: "Pathway\nDiffer\nby LAI",
-    28: "Campus\nPreferred\nPathway",
-    29: "Specialty\nPharmacy",
-    30: "AOB",
-    31: "Buy and\nBill",
-    32: "ASOC",
-    33: "ViiV Connect\nUser Level",
-    34: "ViiV Claims\nPortal User",
-    35: "HIT Resource\nOpportunity",
-    36: "HIT Resource\nUsed",
-    37: "Recurring\nMeetings\nC/D Suite",
-    38: "% Campuses\nFlagged\nTFRM",
-    39: "Territory\nFRM\nLaunched",
-    40: "Care\nOffered\nAll Patients",
-    41: "Last\nUpdate",
+    12: "Barrier 1\nCategory",
+    13: "Barrier 1\nSubcategory",
+    14: "Barrier 1\nStart Date",
+    15: "Barrier 1\nClose Date",
+    16: "Barrier 2\nCategory",
+    17: "Barrier 2\nSubcategory",
+    18: "Barrier 2\nStart Date",
+    19: "Barrier 2\nClose Date",
+    20: "Start of Qtr\nImpl. Stage",
+    21: "Current\nImpl. Stage",
+    22: "CARE Team\nCEP Stage",
+    23: "Evolved\n(DO NOT\nUPDATE)",
+    24: "Centralized\nor\nDecentralized",
+    25: "C/D Suite\nAccess",
+    26: "Current\nEHR",
+    27: "ViiV 340b\nContract",
+    28: "340b\nEligibility\nCampuses",
+    29: "Pathway\nMapped",
+    30: "Pathway\nDiffer\nby LAI",
+    31: "Campus\nPreferred\nPathway",
+    32: "Specialty\nPharmacy",
+    33: "AOB",
+    34: "Buy and\nBill",
+    35: "ASOC",
+    36: "ViiV Connect\nUser Level",
+    37: "ViiV Claims\nPortal User",
+    38: "HIT Resource\nOpportunity",
+    39: "HIT Resource\nUsed",
+    40: "Recurring\nMeetings\nC/D Suite",
+    41: "% Campuses\nFlagged\nTFRM",
+    42: "Territory\nFRM\nLaunched",
+    43: "Care\nOffered\nAll Patients",
+    44: "Last\nUpdate",
 }
 
 # =============================================================================
@@ -268,5 +343,15 @@ def _validate():
                     raise ValueError(
                         f"CONFIG ERROR: section headers overlap: ({s1}-{e1}) and ({s2}-{e2})"
                     )
+
+    header_cols = set(COL_HEADERS.keys())
+    expected = set(range(1, MAX_OUT_COL + 1))
+    if header_cols != expected:
+        missing_cols = expected - header_cols
+        extra_cols = header_cols - expected
+        raise ValueError(
+            f"CONFIG ERROR: COL_HEADERS should cover cols 1-{MAX_OUT_COL} exactly. "
+            f"Missing: {sorted(missing_cols)}  Extra: {sorted(extra_cols)}"
+        )
 
 _validate()
