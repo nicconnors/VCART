@@ -1,26 +1,72 @@
 """
 migrate.py — VCART
 ====================
-ONE-TIME migration for the VCART Totals output workbook.
+ONE-TIME migration for the VCART Totals output workbook's time-series
+table (row 3 header + month rows), moving existing historical data from
+the OLD column layout to the NEW layout introduced by this round of
+fixes.
 
-Moves existing historical time-series data from the OLD column layout
-(cols 12-18 = Q1-4 Prioritized Barrier + Prioritized Impl. Barrier +
-Current/Start-of-Qtr Stage, cols 19-41 = CEP onward) to the NEW layout
-(cols 12-21 = the restructured Barrier Tracking block, cols 22-44 = CEP
-onward, shifted +3).
+Frozen snapshot blocks are deliberately NOT migrated — see "What this
+does NOT touch" below.
 
-Same pattern as ADFR's migrate.py — see that file for the fuller
-rationale. Touches ONLY the top time-series table (row 3 header + month
-rows). Does NOT touch the LIVE section (fully rewritten by main.py on its
-next run anyway) or any "VCART Systems - ..." snapshot sheets.
+WHAT CHANGED, AND WHY EVERY TS COLUMN SHIFTS (NOT JUST THE ONES AFTER
+BARRIER TRACKING)
+-------------------------------------------------------------------------
+1. The TS table used to place its data 3 columns to the LEFT of where
+   the exact same field sits in the LIVE section below it (the TS table
+   only needs 2 label columns — Month, Total Barriers — instead of the
+   5 identity columns LIVE needs, so its data started at column 3
+   instead of column 6). That meant the same column letter meant a
+   DIFFERENT field depending which table you were looking at — column N
+   was "Barrier 1 Start Date" in LIVE but something else entirely in the
+   TS table above it. This migration removes that offset entirely: TS
+   data now starts at the same column as everywhere else, with cols 3-5
+   left as blank spacers. This shifts EVERY TS data column, including
+   the Implementation Barrier percentages, which hadn't otherwise
+   changed at all.
 
-What moves, in TS-column terms (ts_col = out_col - 6 + 3 = out_col - 3):
-  - Barrier booleans (old/new ts cols 3-8): unchanged position, untouched.
-  - Old ts cols 9-15 (Q1-4 Barrier, Prioritized Impl. Barrier, Current
-    Stage, Start-of-Qtr Stage): RETIRED — no clean equivalent in the new
-    10-field Barrier Tracking structure, so these are cleared, not moved.
-  - Old ts cols 16-38 (CEP onward through Last Update): shifted +3 to new
-    ts cols 19-41, values + formatting preserved exactly.
+2. Two new "Days to Close" columns were added (one after each Barrier's
+   Close Date). No historical equivalent ever existed, so these are left
+   blank going back — nothing to migrate, they'll start populating from
+   the next real run onward.
+
+3. Barrier 2's fields (Category/Subcategory/Start Date/Close Date) and
+   both Implementation Stage fields shift further to make room for the
+   new Days-to-Close columns. This part IS safely migrated — that data
+   was already correctly header-matched in the old script, just sitting
+   at different column numbers.
+
+4. Everything from the old "CARE Team CEP Stage" column onward was read
+   POSITIONALLY in the old script, and this was a real, active bug — two
+   real territory files in the same quarter don't even use the same
+   column layout for this section, so the old script was silently
+   reading different, unrelated fields into the same output column
+   depending on which territory's row it happened to be reading.
+   Confirmed directly against a real output file: the column labeled
+   "CARE Team CEP Stage" held the exact same value as the adjacent
+   "Current Impl. Stage" column in every row checked — that field never
+   existed; the old script was reading stray data into it.
+
+   Because different territories were misaligned in DIFFERENT ways, the
+   NATION-level sums/percentages/modes in this zone blend together
+   readings that don't correspond to the same real field across
+   territories. There's no reliable way to un-scramble that after the
+   fact. Rather than migrate wrong data under new, correctly-labeled
+   columns, this migration leaves the new Territory Fields columns
+   blank for all historical data. Every run from here on populates them
+   correctly.
+
+WHAT THIS DOES NOT TOUCH
+-------------------------------------------------------------------------
+Frozen snapshot blocks (the dated historical detail blocks below the
+LIVE section) are left completely as they were — not migrated, not
+reformatted, not touched at all. Migrating them accurately would mean
+tracking two different column-alignment schemes at once for something
+that's only ever used for point-in-time reference, not active trend
+analysis — not worth the complexity. They'll simply keep aging out
+naturally as new snapshots get frozen going forward (max 11 kept,
+oldest trimmed automatically), so this isn't a permanent state — it's
+just how the transition period looks.
 
 Does NOT touch the source file. Writes a new file
 (<original_name>.MIGRATED.xlsx) so you can review before replacing the
@@ -35,81 +81,125 @@ from copy import copy
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-import config
-from main import MONTH_NAMES
-from config import TS_HEADER_ROW, TS_START_ROW, TS_END_ROW, COL_HEADERS, SECTION_HEADERS, OUT_DATA_START
+from config import (
+    COL_HEADERS, SECTION_HEADERS, OUT_DATA_START,
+    TS_HEADER_ROW, TS_START_ROW, TS_END_ROW, MONTH_NAMES,
+    VIIV_DARK_COLORS,
+)
 
-# --- Old layout constants (documented, not derived from current config,
-# since config.py now only describes the NEW layout) -----------------------
-OLD_MAX_OUT_COL = 41
-OLD_POST_BARRIER_OUT_START = 19   # old "CARE Team CEP Stage" output col
-OLD_STALE_OUT_START = 12          # old Q1 Prioritized Barrier
-OLD_STALE_OUT_END   = 18          # old Start of Qtr Impl. Stage
+# old_out_col -> new_out_col, for the part of the layout that's safely
+# migratable (identity + Implementation Barriers unchanged; Barrier
+# Tracking's Category/Subcategory/Start/Close/Stage fields shifted to
+# make room for the two new Days-to-Close columns). Old cols 22-44 have
+# NO entry here — deliberately dropped, see module docstring.
+OLD_TO_NEW_COL = {}
+for c in range(1, 12):        # identity (1-5) + Implementation Barriers (6-11): unchanged
+    OLD_TO_NEW_COL[c] = c
+OLD_TO_NEW_COL[12] = 12   # Barrier 1 Category
+OLD_TO_NEW_COL[13] = 13   # Barrier 1 Subcategory
+OLD_TO_NEW_COL[14] = 14   # Barrier 1 Start Date
+OLD_TO_NEW_COL[15] = 15   # Barrier 1 Close Date
+# (new col 16 = Barrier 1 Days to Close — no old equivalent)
+OLD_TO_NEW_COL[16] = 17   # Barrier 2 Category
+OLD_TO_NEW_COL[17] = 18   # Barrier 2 Subcategory
+OLD_TO_NEW_COL[18] = 19   # Barrier 2 Start Date
+OLD_TO_NEW_COL[19] = 20   # Barrier 2 Close Date
+# (new col 21 = Barrier 2 Days to Close — no old equivalent)
+OLD_TO_NEW_COL[20] = 22   # Start of Qtr Impl. Stage
+OLD_TO_NEW_COL[21] = 23   # Current Impl. Stage
+# old cols 22-44 intentionally have no mapping — dropped, see docstring.
 
-NEW_POST_BARRIER_OUT_START = 22   # from config.POST_BARRIER_OUT_START, but pinned
-                                   # here explicitly so this script is self-contained
-                                   # and doesn't silently drift if config changes again
-OUT_COL_DELTA = NEW_POST_BARRIER_OUT_START - OLD_POST_BARRIER_OUT_START  # +3
+OLD_MAX_OUT_COL = 44
 
 
-def _out_to_ts_col(out_col):
-    return out_col - OUT_DATA_START + 3
+def _old_out_to_ts_col(old_out_col):
+    """The OLD file's own TS-column formula — this file was written by
+    the old script, which always used this -3 offset. Only ever applied
+    to the OLD (source) side of the migration; the NEW side no longer
+    uses any offset at all (see module docstring, point 1)."""
+    return old_out_col - OUT_DATA_START + 3
 
 
-# Stale/shift ranges, expressed in TS-column space
-STALE_TS_START = _out_to_ts_col(OLD_STALE_OUT_START)              # 9
-STALE_TS_END   = _out_to_ts_col(OLD_STALE_OUT_END)                # 15
-SHIFT_TS_START = _out_to_ts_col(OLD_POST_BARRIER_OUT_START)       # 16
-SHIFT_TS_END   = _out_to_ts_col(OLD_MAX_OUT_COL)                  # 38
-TS_COL_DELTA   = OUT_COL_DELTA                                    # +3
+# old_ts_col -> new_out_col directly (no more offset on the new side).
+# Every out_col >= OUT_DATA_START shifts, including the Implementation
+# Barrier percentages (6-11), which hadn't otherwise changed — old
+# ts_col 3-8 moves to new out_col 6-11, a straight +3, purely from
+# removing the offset.
+OLD_TO_NEW_TS_COL = {
+    _old_out_to_ts_col(old_out_col): new_out_col
+    for old_out_col, new_out_col in OLD_TO_NEW_COL.items()
+    if old_out_col >= OUT_DATA_START
+}
+OLD_MAX_TS_COL = _old_out_to_ts_col(OLD_MAX_OUT_COL)
 
 
-def migrate_data_row(ws, row):
-    """Shift one time-series row's old CEP-onward ts-cols to their new
-    positions (right-to-left, to avoid clobbering source cells before
-    they're read), then clear the retired Q1-4/Impl.Barrier/Stage block.
-    Barrier boolean ts-cols (3-8) are untouched — they didn't move.
+def _migrate_row_cols(ws, row, col_map, max_old_col, min_col=1):
     """
-    for old_ts_col in range(SHIFT_TS_END, SHIFT_TS_START - 1, -1):
-        new_ts_col = old_ts_col + TS_COL_DELTA
-        src = ws.cell(row=row, column=old_ts_col)
-        dst = ws.cell(row=row, column=new_ts_col)
-        dst.value = src.value
-        if src.has_style:
-            dst.font          = copy(src.font)
-            dst.fill          = copy(src.fill)
-            dst.alignment     = copy(src.alignment)
-            dst.number_format = src.number_format
+    Remap one row's columns per col_map (old_col -> new_col), reading
+    every old value into memory FIRST before writing anything — several
+    columns shift by different amounts, so writing in place risks
+    clobbering a value before it's been read. Columns from min_col to
+    max_old_col that aren't in col_map (the dropped old CEP-onward zone)
+    are cleared. Columns before min_col are left completely untouched —
+    used for the TS table's cols 1-2 ("Months" / "Total Barriers"), which
+    aren't part of col_map's remapping at all and must survive as-is.
+    """
+    old_vals = {}
+    for c in range(min_col, max_old_col + 1):
+        cell = ws.cell(row=row, column=c)
+        old_vals[c] = (cell.value, copy(cell.font) if cell.has_style else None,
+                        copy(cell.fill) if cell.has_style else None,
+                        copy(cell.alignment) if cell.has_style else None,
+                        cell.number_format)
 
-    for col in range(STALE_TS_START, STALE_TS_END + 1):
-        cell = ws.cell(row=row, column=col)
+    # Clear every column in the row first (both mapped and dropped source
+    # positions may overlap with destination positions).
+    for c in range(min_col, max_old_col + 1):
+        cell = ws.cell(row=row, column=c)
         cell.value = None
         cell.fill = PatternFill(fill_type=None)
+        cell.font = Font()
+        cell.alignment = Alignment()
+        cell.number_format = "General"
+
+    for old_c, new_c in col_map.items():
+        if old_c < min_col:
+            continue
+        val, font, fill, align, numfmt = old_vals[old_c]
+        dst = ws.cell(row=row, column=new_c)
+        dst.value = val
+        if font is not None:
+            dst.font = font
+            dst.fill = fill
+            dst.alignment = align
+            dst.number_format = numfmt
 
 
 def migrate_ts_header_row(ws):
-    """Rewrite row 3 (the time-series header) to the new column labels,
-    leaving cols 1-2 ("Months" / "Total Barriers") untouched.
+    """Rewrite row 3 (the time-series header) to the new column labels at
+    their new (unshifted) positions, leaving cols 1-2 ("Months" / "Total
+    Barriers") untouched. Cols 3-5 are cleared and left as blank spacers.
     """
-    for out_col, text in COL_HEADERS.items():
-        if out_col < OUT_DATA_START:
-            continue
-        ts_col = _out_to_ts_col(out_col)
-        cell = ws.cell(row=TS_HEADER_ROW, column=ts_col, value=text)
-        cell.font = Font(bold=True, size=9)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.fill = PatternFill(fill_type=None)
-        for start, end, _, color in SECTION_HEADERS:
-            if start <= out_col <= end:
-                cell.fill = PatternFill("solid", fgColor=color)
-                break
-    # Clear anything sitting past the new max ts col, leftover from the
-    # old (narrower) layout.
-    max_ts_col = _out_to_ts_col(max(COL_HEADERS.keys()))
-    for col in range(max_ts_col + 1, max_ts_col + 15):
+    # Clear the entire old TS data range first — old col 3 held real
+    # barrier-percentage data (the old ts_col=3 offset), which is not
+    # where col 3 belongs in the new layout (a blank spacer). Clearing
+    # everything from col 3 through the old file's own max column avoids
+    # leaving stale old-position data sitting underneath the new labels.
+    for col in range(3, OLD_MAX_TS_COL + 5):
         c = ws.cell(row=TS_HEADER_ROW, column=col)
         if c.value is not None:
             c.value = None
+        c.fill = PatternFill(fill_type=None)
+
+    for out_col, text in COL_HEADERS.items():
+        if out_col < OUT_DATA_START:
+            continue
+        cell = ws.cell(row=TS_HEADER_ROW, column=out_col, value=text)
+        fill_color = next((c for s, e, _, c in SECTION_HEADERS if s <= out_col <= e), None)
+        text_color = "FFFFFF" if fill_color in VIIV_DARK_COLORS else "000000"
+        cell.font = Font(bold=True, size=9, color=text_color)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.fill = PatternFill("solid", fgColor=fill_color) if fill_color else PatternFill(fill_type=None)
 
 
 def migrate_workbook(path):
@@ -124,13 +214,22 @@ def migrate_workbook(path):
     for r in range(TS_START_ROW, TS_END_ROW + 1):
         val = ws.cell(row=r, column=1).value
         if val and any(m.lower() in str(val).lower() for m in MONTH_NAMES):
-            migrate_data_row(ws, r)
+            _migrate_row_cols(ws, r, OLD_TO_NEW_TS_COL, OLD_MAX_TS_COL, min_col=3)
             migrated_months += 1
     print(f"    {migrated_months} month row(s) migrated.")
+
+    print("  Frozen snapshot blocks are left untouched — not migrated. See")
+    print("  this script's module docstring for why.")
 
     out_path = path.rsplit(".", 1)[0] + ".MIGRATED.xlsx"
     wb.save(out_path)
     print(f"\n  Saved migrated copy -> {out_path}")
+    print("\n  NOTE: columns 24-44 (Centralized/Decentralized through Last Update) are")
+    print("  blank in all historical rows above. That data was never reliable in the")
+    print("  old file — see this script's module docstring for why. Every run from")
+    print("  here on populates those columns correctly. (The old 'Evolved' column has")
+    print("  also been dropped entirely — it's a hidden field that was never meant")
+    print("  to be used.)")
     return out_path
 
 

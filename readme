@@ -1,364 +1,71 @@
-# VRHR Aggregator
+# VCART VRHR Aggregator
 
-Reads the most recent quarterly file (`Q<n>.<REGION>.<m>.<d>.<yy>.xlsx`) from each
-regional OneDrive folder, aggregates it into a master
-`ADFR.Region.Nation.Totals.New.xlsx` with a rolling monthly time series, LIVE
-section, historical snapshots, and a Trends & Takeaways sheet.
-
----
+Reads each of the 16 territories' VCART VRHR files from OneDrive and rolls
+them up into one master workbook: `VCART.Region.Nation.Totals.New.xlsx`.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `main.py` | Core aggregator — run this every refresh |
-| `config.py` | All constants, column mappings, region definitions |
-| `migrate.py` | One-time migration tool — see [Migration](#migration) below |
-
----
+- **`main.py`** — run this every refresh. Reads the territory files, writes
+  `VCART Totals` and `VCART Systems - LIVE`.
+- **`summary.py`** — builds the Trends & Takeaways sheet. Called by
+  `main.py`; not meant to be run on its own.
+- **`config.py`** — territory list, column mappings, header text, colors.
+- **`migrate.py`** — one-time tool, only needed if `config.py`'s column
+  layout shifts again. Not part of the normal refresh.
 
 ## Setup
 
-### 1. Sync the source files from Teams/SharePoint
+1. Sync (not download) the **VCART VRHR** subfolder under **ViiV Field
+   Reimbursement Managers - 2026** in Teams/SharePoint. `config.py` finds
+   it automatically once synced.
+2. `python -m venv venv` then `.\venv\Scripts\python.exe -m pip install openpyxl`
 
-Before running the script, you need the regional VRHR folders available locally. In Teams or SharePoint:
-
-1. Go to **ViiV Field Reimbursement Managers - 2026**
-2. Click **Sync** (not Download) on the 2026 folder, or the regional subfolders you need — if you don't see Sync, check the `...` menu or right-click the folder.
-
-**Sync vs. Download:**
-- **Sync** mirrors the folder locally and keeps it updated automatically in the background as teammates edit source files. This is what the script expects — use this one.
-- **Download** grabs a one-time static zip copy that never updates again. Don't use this.
-
-Once synced, the folder appears locally at `C:\Users\<yourname>\GSK\ViiV Field Reimbursement Managers - 2026\...` and `config.py` finds it automatically — no path editing needed.
-
-> Note: sync isn't instant. If you run the script right after a teammate edits a file, give OneDrive a minute to catch up before running.
-
-### 2. Install Python and dependencies
-
-```
-python -m venv venv
-.\venv\Scripts\python.exe -m pip install openpyxl
-```
-Python 3.10+ recommended.
-
-`config.py` auto-detects `BASE_2026`, `OUTPUT`, and `OLD_FILE` from your home directory once the folder above is synced — no changes needed. If it can't find the folder (e.g. your OneDrive folder isn't named `GSK`, or the sync folder name has changed), it raises a clear error telling you which environment variable to set instead (`VRHR_BASE_2026`, `VRHR_OUTPUT`, `VRHR_OLD_FILE`).
-
----
+If your OneDrive folder isn't found automatically, set `VCART_BASE_DIR` /
+`VCART_OUTPUT` as environment variables instead of editing `config.py`.
 
 ## Usage
 
-Normal refresh:
 ```
 python main.py
 ```
 
-Run this monthly (or as often as you want a refresh). It's safe to run multiple
-times within the same month — it detects that and just refreshes the LIVE data in
-place rather than duplicating a row or freezing a snapshot early.
-
----
-
-## How It Works
-
-Each run of `main.py`:
-
-1. **Read regional files.** For each of the 6 regions, finds the most recently
-   dated quarterly file (`Q<n>.<REGION>.<m>.<d>.<yy>.xlsx`) — quarter number isn't
-   hardcoded, so Q4 gets picked up automatically once it exists, no code changes
-   needed. Within that file:
-   - Barrier booleans (output cols 3-8) and Pathway-mapped-onward (cols 24-40) are
-     read positionally off the main `"...vrhr..."` sheet's row 3 (TOTALS row) — this
-     part of the layout hasn't moved.
-   - Customer Engagement Phase fields (cols 19-23) are read from the same main sheet,
-     but matched by **header text**, not position (see [Header-Text Lookup](#header-text-lookup) below).
-   - Barrier Tracking fields (cols 9-18) are read from a separate `"...Barrier
-     Movement..."` sheet, also matched by header text.
-   - Campus count is counted dynamically from the file's data rows, falling back to
-     `REGION_ACCOUNTS` in config only if that fails.
-
-2. **Open or create the output file.** If it doesn't exist yet, creates a fresh
-   workbook with headers and column widths. If it exists, loads it and (only if the
-   time series is completely empty) backfills time-series rows from any existing
-   snapshot blocks.
-
-3. **Write the current month into the time series**, rotating the oldest row out
-   once 12 months are filled. Matches an existing row by **year and month together**,
-   not just month name — see [Year-Aware Matching](#year-aware-matching).
-
-4. **Freeze a snapshot if the month changed.** Compares the LIVE section's last
-   refresh date to today by year+month (not just month name — see below) — if it's a
-   new month, the current LIVE section is frozen into a dated snapshot block before
-   being overwritten. Snapshots are capped at 11, oldest trimmed automatically.
-
-5. **Write the new LIVE section** — raw counts + percentage sub-sections, one row
-   per region plus a NATION summary row. LIVE floats dynamically to sit one blank row
-   below the last filled time-series row.
-
-6. **Build the Trends & Takeaways sheet** from the time series and LIVE pct section.
-
-7. **Apply column widths and formatting**, then save. Column widths only get
-   backfilled where missing — manual resizing in Excel is preserved run to run (see
-   [Column Widths](#column-widths) below).
-
----
-
-## Sheet Structure — Territory ADFR Totals
-
-```
-Row 1           Title
-Row 3           Time series header (Months, Total Barriers, col headers)
-Rows 4-15       Time series (one row per month, max 12, strictly chronological)
-[blank row]
-LIVE row        "LIVE - refreshed M.DD.YY" (yellow fill)
-                Raw counts section (section header + col header + 6 regions + NATION)
-                [gap row]
-                % section (section header + col header + 6 regions + NATION)
-[gap row]
-Snapshots       Historical frozen snapshots (yellow date row + raw + pct blocks)
-                Max 11 snapshots kept, oldest trimmed automatically
-```
-
-### Column layout (40 columns)
-
-| Cols | Section | Source |
-|---|---|---|
-| 1-2 | Region, Total Accounts | — |
-| 3-8 | Implementation Barriers | Main sheet, positional |
-| 9-18 | Barrier Tracking (Barrier 1/2 Category, Subcategory, Start/Close Date, Stage) | **Barrier Movement sheet**, header-text lookup |
-| 19-23 | Customer Engagement Phase | Main sheet, header-text lookup |
-| 24-30 | Mapping the Pathway | Main sheet, positional |
-| 31-34 | Buy and Bill Pathway | Main sheet, positional |
-| 35-40 | Specialty Pharmacy Pathway | Main sheet, positional |
-
----
-
-## Sheet Structure — Trends & Takeaways
-
-- **Title + subtitle** — refresh timestamp, total campuses, current total barriers
-- **Key Metrics** — 5 stat cards: Total Barriers, Top Barrier Type, Pathway Mapped, Buy & Bill, SP
-- **Barrier Trends** — table with Month, Total Barriers, MoM Change, 6 barrier type %. Green/red MoM coloring. Chart at column V (2+ months required)
-- **Barrier Breakdown** — heatmap per region: red >60%, yellow 30–60%, green <30%
-- **Pathway & Access** — read directly from the LIVE pct section (Pathway Mapped col 24, Buy & Bill cols 31–34, SP cols 37–40)
-
----
-
-## Regions
-
-| Region | Campus count |
-|---|---|
-| West Coast | Dynamic — counted from file each run |
-| Central | Dynamic |
-| Great Lakes | Dynamic |
-| NorthEast | Dynamic |
-| SouthEast | Dynamic |
-| MidAtlantic | Dynamic |
-| NATION | Sum / mode of all regions (see below) |
-
-Campus counts are read live from each region's quarterly file every run
-(`count_campus_rows`). The `REGION_ACCOUNTS` values in `config.py` are only a
-fallback used if a file's campus count can't be determined.
-
-**NATION row logic:** numeric columns (`NATION_SUM_COLS`) are summed across regions.
-Two text columns — "Independent decision making..." (col 19) and "Level of ViiV
-Connect user" (col 23) — are categorical, not numeric, so NATION instead shows
-whichever answer is **most common** across regions (`NATION_MODE_COLS`), not a sum.
-
----
-
-## Header-Text Lookup
-
-Barrier Tracking (cols 9-18) and Customer Engagement Phase (cols 19-23) are **not**
-read by fixed column position. The source layout for this region of the file has
-already shifted once — a Subcategory column was inserted and "Prioritized Barrier
-3" was dropped when the separate Barrier Movement sheet was introduced — so a fixed
-position silently breaks the moment a column gets inserted, removed, or reordered
-again.
-
-Instead, `BARRIER_MOVEMENT_FIELDS` and `CEP_FIELDS` in `config.py` each list, per
-output column, one or more candidate header strings to search for in row 6 of the
-relevant sheet. The first candidate that matches wins. If none match, the script
-prints a warning naming the output column and the candidates it tried, and leaves
-that field blank rather than silently pulling the wrong data.
-
-If a region's file has no sheet matching `"barrier movement"` at all (e.g. it
-hasn't been updated to the new format yet), cols 9-18 are left blank with a warning
-— everything else in that region's row still populates normally.
-
----
-
-## Year-Aware Matching
-
-Two places compare "is this the same month as before" — both do it by **(year,
-month)**, not month name alone:
-
-- **Time series row matching** (`update_time_series`): without year-awareness, a
-  new January would match an *existing* January row from a prior year (still sitting
-  in the 12-row time-series block) by name and silently overwrite it in place instead
-  of rotating a new row in — scrambling the chronological order and corrupting the
-  Trends & Takeaways month-over-month chart.
-- **Snapshot rollover detection** (`detect_live_month` / `main`): without
-  year-awareness, if a full year+ passes with no runs and the next run happens to
-  land on the same calendar month as the last one, the script would think "same
-  month, just refresh" and silently overwrite the old LIVE data with **no snapshot
-  ever taken** — a full year of data lost with no trace.
-
-Both are covered by tests simulating multi-year runs; see the codebase's git history
-/ prior conversation for the specific reproductions if this ever needs re-verifying.
-
----
-
-## Column Widths
-
-`apply_column_widths(ws, force=...)`:
-- **`force=True`** (first run only, brand-new file): sets the full intended layout.
-- **`force=False`** (every later run): only fills in a width for a column that has
-  **no width recorded at all** — never overwrites a width that's already present.
-  This means manual resizing in Excel survives future runs, while still backfilling
-  any column that's missing a width entirely (e.g. if the layout grows and a new
-  column is added).
-
----
-
-## Migration
-
-`migrate.py` is a **one-time** tool for moving an *existing* output file's
-historical time-series data into a new column layout after `config.py`'s column
-structure changes (e.g. when Barrier Tracking grew from 11 to 15 columns). It is
-**not** part of the normal refresh flow and does not run automatically.
-
-It touches **only** the top time-series table (row 3 header + month rows) — it does
-**not** touch the LIVE section (which gets fully rewritten by `main.py` on its next
-run anyway) or any snapshot blocks.
-
-Usage — pass the path to your **existing** output file as an argument:
-```
-python migrate.py "C:\Users\<you>\GSK\ViiV Field Reimbursement Managers - 2026\ADFR.Region.Nation.Totals.New.xlsx"
-```
-
-It never overwrites your original — it writes a new file alongside it with
-`.MIGRATED.xlsx` appended to the name. Open the migrated copy, confirm it looks
-right, then rename it into place (or rename your original to something like
-`...OLD.xlsx` first, then drop the `.MIGRATED` suffix from the new one) before
-running `main.py` again.
-
-Only re-run `migrate.py` if `config.py`'s column layout changes again in a way that
-shifts existing columns — it is not something you run every month.
-
----
-
-## Key Architecture Decisions
-
-**Dynamic LIVE placement**
-`get_live_offsets(ws)` is the single source of truth for all LIVE section row numbers.
-Derives every row position from `get_live_base(ws)`, which scans for the last filled
-month. Change LIVE layout in one place only.
-
-**Dynamic snapshot start**
-`get_snap_start(ws)` derives from `get_live_offsets`, so snapshot positions
-automatically adjust as months accumulate through the year.
-
-**No hardcoded row numbers**
-`TS_END_ROW = TS_START_ROW + 11` in config (12 months max). Everything else derived.
-
-**Dynamic file discovery**
-`find_sprint_file` picks the most recent quarterly file by parsing the date out of
-the filename itself (`m.d.yy` tokens), falling back to file modified time only if
-the filename can't be parsed. No quarter number is hardcoded — Q4 files are picked
-up automatically once they exist.
-
-**Header-text lookup for the volatile columns**
-See [Header-Text Lookup](#header-text-lookup) above — cols 9-23 are matched by
-header wording, not position, since that region of the source layout has already
-shifted once.
-
-**Year-aware month comparisons**
-See [Year-Aware Matching](#year-aware-matching) above.
-
-**Column width preservation**
-See [Column Widths](#column-widths) above.
-
-**Pathway & Access data**
-Read directly from the Territory sheet's LIVE pct section rather than recomputed,
-ensuring Trends & Takeaways always matches the Territory sheet.
-
----
-
-## Config Reference
-
-| Setting | Description |
-|---|---|
-| `BASE_2026` | Root path to the 2026 OneDrive folder — auto-detected from home directory, override with `VRHR_BASE_2026` |
-| `OUTPUT` | Path to `ADFR.Region.Nation.Totals.New.xlsx` — override with `VRHR_OUTPUT` |
-| `OLD_FILE` | Path to the original `ADFR.Region.Nation.Totals.xlsx` — override with `VRHR_OLD_FILE`. Currently unused by `main.py`; kept for legacy/migration reference |
-| `REGIONS` | List of (label, folder) tuples |
-| `REGION_ACCOUNTS` | Fallback campus counts per region, used only if dynamic counting fails |
-| `NATION_TOTAL` | Auto-derived as sum of `REGION_ACCOUNTS` at runtime |
-| `MAIN_SHEET_KEYWORD` | `"vrhr"` — keyword used to find the main quarterly sheet |
-| `BARRIER_MOVEMENT_SHEET_KEYWORD` | `"barrier movement"` — keyword used to find the Barrier Movement sheet |
-| `SOURCE_HEADER_ROW` | Row 6 — header row on both source sheets, used for header-text lookup |
-| `SPRINT_COLS` | `{output_col: source_col}` for the positional (unchanged) parts of the layout: barrier booleans and Pathway-onward |
-| `BARRIER_MOVEMENT_FIELDS` | `{output_col: [candidate header strings]}` for cols 9-18, matched on the Barrier Movement sheet |
-| `CEP_FIELDS` | `{output_col: [candidate header strings]}` for cols 19-23, matched on the main sheet |
-| `NATION_SUM_COLS` | Output cols summed for the NATION row / time series % |
-| `NATION_MODE_COLS` | Output cols (19, 23) where NATION shows the most-common value instead of a sum |
-| `PCT_COLS` | Output cols shown as percentages in the LIVE % section |
-| `TS_HEADER_ROW` | Row 3 — time series header |
-| `TS_START_ROW` | Row 4 — first monthly data row |
-| `TS_END_ROW` | Row 15 — last monthly data row (derived, max 12 months) |
-| `SECTION_HEADERS` | (start_col, end_col, label, hex_color) for each section |
-| `COL_HEADERS` | `{col: header_text}` for every output column (1-40) |
-| `YELLOW` | Hex color for LIVE row and snapshot date rows |
-| `NATION_FILL` | Hex color for NATION row background |
-
----
-
-## Updating for a New Year
-
-1. Update `BASE_2026` path in `config.py` (or the `VRHR_BASE_2026` env var) to the new year folder
-2. Update `OUTPUT` path
-3. Delete or archive the previous year's output file
-4. Run `main.py` fresh — it will start a new time series
-
----
-
-## Troubleshooting
-
-**"No file found in [folder]"**
-Check that the regional folder exists and contains a file matching `Q<n>.<REGION>.<m>.<d>.<yy>.xlsx`.
-
-**"Could not read row 3 on main sheet"**
-Quarterly file found but no sheet matching `"vrhr"` exists. Check the sheet name inside the file.
-
-**"No 'barrier movement' sheet found — barrier tracking columns (9-18) will be blank"**
-That region's file doesn't have a sheet matching `"barrier movement"` in its name yet.
-Everything else (barrier booleans, CEP fields, Pathway-onward) still populates
-normally — only cols 9-18 are blank for that region until the file is updated.
-
-**"Could not find header for output col X (tried: [...]) — leaving blank"**
-A header-text lookup (cols 9-23) didn't find a match on the expected sheet. Usually
-means the source file's column header wording changed. Check the candidate strings
-listed in the warning against the actual header row (row 6) of that sheet, and
-update `BARRIER_MOVEMENT_FIELDS` / `CEP_FIELDS` in `config.py` if the wording has
-genuinely changed.
-
-**MergedCell error**
-Should not occur. `unmerge_row` is called before any write to time series rows.
-
-**LIVE section in wrong position**
-Delete the output file and rerun `main.py` from scratch.
-
-**Snapshot count growing too large**
-`_trim_snapshots` keeps max 11 automatically. No action needed.
-
-**Time series rows look out of order, or a snapshot seems to be missing after a long gap**
-Should not happen — see [Year-Aware Matching](#year-aware-matching). If it does,
-it likely means the LIVE label's date (`LIVE - refreshed M.DD.YY`) or a time-series
-row's date got hand-edited into an unparseable format. Check that dates in column A
-still match the expected `Month (MM/DD/YY)` / `LIVE - refreshed M.D.YY` patterns.
-
-**`FileNotFoundError: BASE_2026 not found`**
-Your OneDrive sync folder isn't named `GSK` under your home directory, the sync
-folder name has changed, or you haven't synced the folder yet (see Setup above).
-Set the `VRHR_BASE_2026` environment variable to your actual local path instead of
-editing `config.py`.
+Run monthly, or as often as you want. Safe to run more than once in the
+same month — it just refreshes in place instead of duplicating a row.
+
+## What it builds
+
+- **VCART Totals** — territory-level totals: Implementation Barriers,
+  Barrier 1/2 tracking, Discovery/Pathway/Tech/Sustainment fields
+- **VCART Systems - LIVE** — every real campus row across all 16
+  territories
+- **Trends & Takeaways** — monthly trend charts, breakdown tables,
+  closed-barrier tracking, Days to Close by category
+
+Each sheet keeps a monthly time series (up to 12 months) plus a LIVE
+section, and freezes the previous month into a snapshot on rollover
+(last 11 kept). The top time-series table's Months/Total Barriers labels
+sit at columns D/E, with A–C left blank.
+
+The 4 Barrier 1/2 Start/Close Date columns are hidden by default on both
+`VCART Totals` and `VCART Systems - LIVE` (Days to Close stays visible).
+Unhide manually in Excel anytime — the next run re-hides them.
+
+## Days to Close & % Campuses Flagged TFRM
+
+NATION's Days to Close is a pooled average of every individual closed
+barrier nationwide (Barrier 1 and Barrier 2 tracked separately, scoped to
+barriers closed this quarter) — not an average of each territory's own
+number. % Campuses Flagged TFRM is a campus-weighted average across
+territories, not a plain average. The current month's row in the time
+series uses the same calculations as NATION, so they always match.
+
+## If something looks off
+
+- **Blank field with a warning in the console** — the source file's
+  column header text changed; add the new wording to the matching list
+  in `config.py`.
+- **A territory's barrier data is all blank** — that file has no sheet
+  matching "barrier movement" yet.
+- **Layout looks broken** — delete the output file and let it rebuild
+  fresh, or check for a hand-edited date that no longer matches the
+  expected format.
