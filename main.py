@@ -242,22 +242,50 @@ def _is_real_campus_row(row, require_bool_col=True):
     return len(row) > 8 and isinstance(row[8], (bool, int, float))
 
 
+# =============================================================================
+# QUARTER MAPPING
+# Calendar-quarter helper used by the "closed this quarter" scope below —
+# Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec. Kept as its own function
+# (rather than inlined) so the quarter definition lives in exactly one
+# place if it ever needs to change (e.g. a fiscal year offset). Ported
+# from ADFR's identical helper.
+# =============================================================================
+
+def get_quarter_months(month):
+    """Return the set of calendar months (1-12) in the quarter containing `month`.
+    Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec."""
+    start = ((month - 1) // 3) * 3 + 1
+    return set(range(start, start + 3))
+
+
 def scan_campus_barrier_closures(ws_mv, mv_header_map, target_year=None, target_month=None,
-                                  filter_by_month=True):
+                                  scope="month"):
     """
     Scan per-campus rows on the Barrier Movement sheet. A barrier is
     "closed" if its Close Date cell holds a real date — text entries
     don't count. Ported from ADFR's version of the same function.
 
-    When filter_by_month is True (default), only counts a barrier closed
-    in the target month (year AND month) — defaults to the current real
-    month, so this reports barriers closed THIS month. When False, every
-    closed barrier counts regardless of when — since the source file only
-    ever covers one quarter, that's effectively "closed this quarter."
+    scope controls the date window used to decide which closures count:
+      "month"   — only counts a barrier closed in target_month/target_year
+                  (defaults to the current real month/year). This is
+                  "closed this month," and re-runs later in the same
+                  calendar month will always agree with each other.
+      "quarter" — only counts a barrier closed within the same calendar
+                  quarter as target_month (Q1=Jan-Mar, Q2=Apr-Jun,
+                  Q3=Jul-Sep, Q4=Oct-Dec) AND target_year (defaults to the
+                  current real month/year, so "this quarter" means the
+                  quarter containing today). A close date from a different
+                  quarter — even one still sitting in this quarter's
+                  source file, e.g. a stale row that never got cleaned up
+                  — is correctly excluded. This does NOT assume "every
+                  closed barrier in the file belongs to the current
+                  quarter"; it checks the actual Close Date against the
+                  quarter's month range.
+      "all"     — every closed barrier counts, no date filtering at all.
 
     Returns (closed_count, category_days, barrier1_days, barrier2_days):
-      closed_count  — barriers closed (in the target month, or all-time if
-                       filter_by_month=False), this territory (Barrier 1 + 2)
+      closed_count  — barriers closed (per scope above), this territory
+                       (Barrier 1 + 2)
       category_days — list of (category_name, days_to_close) for every
                        counted barrier that also has a resolved category
                        and a valid Days to Close number, for both slots
@@ -265,10 +293,12 @@ def scan_campus_barrier_closures(ws_mv, mv_header_map, target_year=None, target_
                        only, for every counted barrier with a valid number
       barrier2_days — same, Barrier 2 slot only
     """
-    if filter_by_month and (target_year is None or target_month is None):
+    if scope in ("month", "quarter") and (target_year is None or target_month is None):
         now = datetime.now()
         target_year = target_year if target_year is not None else now.year
         target_month = target_month if target_month is not None else now.month
+
+    allowed_months = get_quarter_months(target_month) if scope == "quarter" else None
 
     cat1_col   = _resolve_field_col(mv_header_map, BARRIER_TRACKING_FIELDS[12])
     close1_col = _resolve_field_col(mv_header_map, BARRIER_TRACKING_FIELDS[15])
@@ -296,8 +326,13 @@ def scan_campus_barrier_closures(ws_mv, mv_header_map, target_year=None, target_
             close_val = _at(row, close_col)
             if not isinstance(close_val, datetime):
                 continue
-            if filter_by_month and (close_val.year != target_year or close_val.month != target_month):
-                continue
+            if scope == "month":
+                if close_val.year != target_year or close_val.month != target_month:
+                    continue
+            elif scope == "quarter":
+                if close_val.year != target_year or close_val.month not in allowed_months:
+                    continue
+            # scope == "all": no date filtering at all.
             closed_count += 1
             cat_val = _at(row, cat_col)
             days_val = clean_source_value(_at(row, days_col))
@@ -550,15 +585,21 @@ def read_territory_file(filepath, terr_label):
     # #DIV/0! formula-error artifact for Days to Close).
     if ws_mv is not None:
         closed_count, category_days, barrier1_days, barrier2_days = scan_campus_barrier_closures(
-            ws_mv, mv_header_map)
+            ws_mv, mv_header_map, scope="month")
         totals_raw["closed_count"] = closed_count
         totals_raw["category_days_to_close"] = category_days
         totals_raw["barrier1_days_to_close"] = barrier1_days
         totals_raw["barrier2_days_to_close"] = barrier2_days
 
+        # Scoped to the current calendar quarter (Jan-Mar/Apr-Jun/Jul-Sep/
+        # Oct-Dec) — a barrier only counts here if its own Close Date
+        # actually falls within that 3-month window AND the current year,
+        # not just because it's a closed barrier that happens to be
+        # sitting in this quarter's source file. A stale close date from
+        # an earlier quarter (or year) is excluded.
         (closed_count_quarter, category_days_quarter,
          barrier1_days_quarter, barrier2_days_quarter) = scan_campus_barrier_closures(
-            ws_mv, mv_header_map, filter_by_month=False)
+            ws_mv, mv_header_map, scope="quarter")
         totals_raw["closed_count_quarter"] = closed_count_quarter
         totals_raw["category_days_to_close_quarter"] = category_days_quarter
         totals_raw["barrier1_days_to_close_quarter"] = barrier1_days_quarter
@@ -959,10 +1000,11 @@ def write_nation_row(ws, row_num, all_td, raw=True):
     # barrier's own Days to Close number, nationwide, not an average of
     # each territory's own pre-existing value. Barrier 1 and Barrier 2 are
     # kept separate (col 16 only pools Barrier 1 closures, col 21 only
-    # Barrier 2). Uses the "closed this quarter" lists (no month filter)
-    # since that's the scope each territory's own value used to reflect.
-    # Same pooled average shown in both raw and pct NATION rows — not a
-    # "% of total" field, just a plain number.
+    # Barrier 2). Uses the "closed this quarter" lists — properly windowed
+    # to the current calendar quarter (see scan_campus_barrier_closures) —
+    # matching the scope each territory's own value used to reflect. Same
+    # pooled average shown in both raw and pct NATION rows — not a "% of
+    # total" field, just a plain number.
     b1_pool = [d for td in valid for d in td["totals"].get("barrier1_days_to_close_quarter", [])]
     b2_pool = [d for td in valid for d in td["totals"].get("barrier2_days_to_close_quarter", [])]
     for out_col, pool in zip(BARRIER_DAYS_TO_CLOSE_COLS, (b1_pool, b2_pool)):
@@ -1184,12 +1226,13 @@ def update_time_series(ws, all_td, snap_date):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
         elif out_col in BARRIER_DAYS_TO_CLOSE_COLS:
             # Same pooled method as write_nation_row (see there for why):
-            # pool every individual closed barrier nationwide, Barrier 1
-            # and Barrier 2 kept separate — not a mode/most-common of each
-            # territory's own value (which is what the generic else branch
-            # below would otherwise do, since these cols aren't numeric
-            # sums). This row represents the SAME current pull as the LIVE
-            # section's NATION row, so the two must agree.
+            # pool every individual closed barrier nationwide (properly
+            # quarter-windowed), Barrier 1 and Barrier 2 kept separate —
+            # not a mode/most-common of each territory's own value (which
+            # is what the generic else branch below would otherwise do,
+            # since these cols aren't numeric sums). This row represents
+            # the SAME current pull as the LIVE section's NATION row, so
+            # the two must agree.
             key = ("barrier1_days_to_close_quarter" if out_col == BARRIER_DAYS_TO_CLOSE_COLS[0]
                    else "barrier2_days_to_close_quarter")
             pool = [d for td in valid for d in td["totals"].get(key, [])]

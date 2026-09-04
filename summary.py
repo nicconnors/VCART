@@ -84,8 +84,11 @@ def aggregate_category_counts(all_td, cat_out_col):
 def build_days_to_close_table(ws, r, all_td, live_tag=""):
     """
     Writes DAYS TO CLOSE BY CATEGORY starting at row r, stacked: once
-    scoped to barriers closed THIS MONTH, then below it with no date
-    filter (closed_count_quarter / category_days_to_close_quarter).
+    scoped to barriers closed THIS MONTH, then below it scoped to barriers
+    closed THIS QUARTER (the current calendar quarter —
+    Jan-Mar/Apr-Jun/Jul-Sep/Oct-Dec — not just every closed barrier in the
+    file; see main.scan_campus_barrier_closures for the actual date-window
+    check) via closed_count_quarter / category_days_to_close_quarter.
     Sorted worst (slowest) first. Returns the row after the second table.
     """
     DARK_BLUE, MED_BLUE = VIIV_NAVY_DARKEST, VIIV_NAVY_MED
@@ -148,7 +151,9 @@ def build_days_to_close_table(ws, r, all_td, live_tag=""):
 def build_closed_barriers_table(ws, r, all_td, live_tag=""):
     """
     Writes CLOSED BARRIERS BY TERRITORY, stacked: Month above Quarter.
-    Returns the row after the second table.
+    "Quarter" here means the current calendar quarter's Close Dates only
+    (see main.scan_campus_barrier_closures, scope="quarter") — not every
+    closed barrier in the file. Returns the row after the second table.
     """
     DARK_BLUE, MED_BLUE = VIIV_NAVY_DARKEST, VIIV_NAVY_MED
     LIGHT_GREY, WHITE = "F2F2F2", "FFFFFF"
